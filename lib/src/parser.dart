@@ -1,0 +1,2332 @@
+// parser.dart
+//
+// Production-grade OOXML -> IR parser for DOCX (word/document.xml).
+// - Robust to missing parts / unknown elements (configurable fallbacks).
+// - Builds proper nested lists (numPr + numbering.xml).
+// - Supports hyperlinks (w:hyperlink + field codes), images (drawing + VML),
+//   textboxes (txbxContent flatten), math (OMML), footnotes, comments.
+// - Does NOT render Markdown (that’s renderer.dart’s job).
+
+import 'dart:math' as math;
+
+import 'package:collection/collection.dart';
+import 'package:xml/xml.dart';
+
+import 'package:docx_to_markdown/src/config.dart';
+import 'package:docx_to_markdown/src/ir.dart';
+import 'package:docx_to_markdown/src/ooxml_package.dart';
+import 'package:docx_to_markdown/src/styles.dart';
+
+/// Callback type for receiving non-fatal parsing warnings.
+///
+/// Implementations should handle or log the warning as appropriate.
+/// Warnings are advisory and do not stop parsing.
+typedef WarningSink = void Function(DocWarning warning);
+
+/// Holds context for parsing, specifically the current part path for resolving relationships.
+class _ParseContext {
+  _ParseContext({required this.partPath});
+  final String partPath;
+}
+
+/// Parses a DOCX package into an intermediate representation (IR) [Document].
+///
+/// This parser handles the complex transition from OOXML (flat XML with
+/// relationships) to a structured block/inline tree.
+///
+/// ### Key Responsibilities
+/// - **Structure recovery:** Reconstructs nested lists and tables from flat
+///   paragraph streams.
+/// - **Resilience:** Handles missing parts or unknown elements based on
+///   [DocxToMarkdownConfig].
+/// - **Normalization:** Resolves styles, numbering, and relationships to
+///   produce a clean IR.
+///
+/// ### Usage
+/// Use [parseMainDocument] to process the entire document.
+class DocxParser {
+  /// Creates a parser for the given DOCX package.
+  ///
+  /// All dependencies are injected to allow testing and customization:
+  /// - [package]: The opened DOCX archive to parse
+  /// - [styles]: Pre-loaded style definitions for heading/code detection
+  /// - [config]: Conversion settings (what to include, how to handle unknowns)
+  /// - [mediaMap]: Mapping from internal media paths to output paths
+  /// - [onWarning]: Callback for non-fatal issues encountered during parsing
+  DocxParser({
+    required this.package,
+    required this.styles,
+    required this.config,
+    required this.mediaMap,
+    required this.onWarning,
+  }) : _numbering = _NumberingModel.fromXml(package.numberingXml),
+       _comments = _CommentIndex.fromXml(package.commentsXml);
+
+  /// The DOCX package being parsed.
+  final DocxPackage package;
+
+  /// Style registry for resolving paragraph semantics (headings, code, quotes).
+  final StyleRegistry styles;
+
+  /// Configuration controlling what content is included and how it's processed.
+  final DocxToMarkdownConfig config;
+
+  /// Mapping from internal media paths (e.g., `word/media/image1.png`) to
+  /// output paths or URLs for use in the rendered Markdown.
+  final Map<String, String> mediaMap;
+
+  /// Callback invoked for each non-fatal warning during parsing.
+  final WarningSink onWarning;
+  final _NumberingModel _numbering;
+  final _CommentIndex _comments;
+  final List<DocWarning> _warnings = [];
+
+  /// Parses `word/document.xml` and its dependencies into a [Document].
+  ///
+  /// This process follows a strict sequence:
+  /// 1. Validation: checks the main document part and body.
+  /// 2. Header/footer extraction (if enabled).
+  /// 3. Body tokenization into a flat stream of [_Token]s.
+  /// 4. Block building (list reconstruction, code merging).
+  /// 5. Post-processing (footnotes and hooks).
+  ///
+  /// Throws [DocxPackageException] if critical parts are missing and
+  /// [DocxToMarkdownConfig.strict] is `true`.
+  Document parseMainDocument() {
+    final docXml = package.documentXml;
+    if (docXml == null) {
+      if (config.strict) {
+        throw DocxPackageException(
+          'word/document.xml not found',
+          part: 'word/document.xml',
+        );
+      }
+      _warn(
+        code: 'missing.part',
+        message: 'word/document.xml not found',
+        location: 'word/document.xml',
+      );
+      return Document(blocks: const [], warnings: List.of(_warnings));
+    }
+
+    final body = _firstDescendantByLocal(docXml, 'body');
+    if (body == null) {
+      if (config.strict) {
+        throw DocxPackageException(
+          'document.xml missing w:body',
+          part: package.mainDocumentPartPath,
+        );
+      }
+      _warn(
+        code: 'invalid.document',
+        message: 'document.xml missing w:body',
+        location: 'word/document.xml',
+      );
+      return Document(blocks: const [], warnings: List.of(_warnings));
+    }
+
+    final mainCtx = _ParseContext(partPath: package.mainDocumentPartPath);
+
+    // 1. Parse Headers
+    final headerBlocks = <Block>[];
+    if (config.includeHeadersFooters) {
+      headerBlocks.addAll(_parseHeadersOrFooters(body, isHeader: true));
+    }
+
+    // 2. Parse Body
+    final builder = _TokenBuilder(warn: _warn, config: config);
+    final children = body.children.whereType<XmlElement>().toList();
+    for (var i = 0; i < children.length; i++) {
+      final el = children[i];
+      final loc = 'document.xml:body[$i]:${el.name.qualified}';
+      final tokens = _tokenizeBodyElement(el, ctx: mainCtx, loc: loc);
+      builder.consumeAll(tokens);
+    }
+    builder.finish();
+
+    // 3. Parse Footers
+    final footerBlocks = <Block>[];
+    if (config.includeHeadersFooters) {
+      footerBlocks.addAll(_parseHeadersOrFooters(body, isHeader: false));
+    }
+
+    // Combine all
+    final allBlocks = [
+      if (headerBlocks.isNotEmpty) ...[
+        ...headerBlocks,
+        const HorizontalRuleBlock(),
+      ],
+      ...builder.outputBlocks,
+      if (footerBlocks.isNotEmpty) ...[
+        const HorizontalRuleBlock(),
+        ...footerBlocks,
+      ],
+    ];
+
+    // 4. Parse Footnotes/Endnotes
+    final footnotes = <String, FootnoteDefinition>{};
+    if (config.includeFootnotes) {
+      footnotes.addAll(_parseFootnotes());
+    }
+    if (config.includeEndnotes) {
+      footnotes.addAll(_parseEndnotesAsFootnotes());
+    }
+
+    // 5. Apply Hooks recursively (once)
+    final hookedBlocks = _applyHooksToBlocks(allBlocks, baseLoc: 'document');
+    final hookedFootnotes = <String, FootnoteDefinition>{};
+    for (final e in footnotes.entries) {
+      final blocks = _applyHooksToBlocks(
+        e.value.blocks,
+        baseLoc: 'footnotes:${e.key}',
+      );
+      hookedFootnotes[e.key] = FootnoteDefinition(id: e.key, blocks: blocks);
+    }
+
+    return Document(
+      blocks: hookedBlocks,
+      footnotes: hookedFootnotes,
+      warnings: List.of(_warnings),
+    );
+  }
+
+  // ===========================================================================
+  // Tokenization (OOXML -> tokens)
+  // ===========================================================================
+
+  /// Converts a single body element into a stream of tokens.
+  ///
+  /// Why tokenization? OOXML represents lists as flat paragraphs with
+  /// numbering properties. We emit [_ListItemToken]s first, then use
+  /// [_TokenBuilder] to reconstruct proper nesting.
+  List<_Token> _tokenizeBodyElement(
+    XmlElement el, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    switch (el.name.local) {
+      case 'p':
+        return _tokenizeParagraph(el, ctx: ctx, loc: loc);
+
+      case 'tbl':
+        return [
+          _BlockToken(
+            _parseTable(el, ctx: ctx, loc: loc),
+            loc: loc,
+          ),
+        ];
+
+      case 'sdt':
+        // Recursive unwrap
+        final content = _firstChildByLocal(el, 'sdtContent');
+        return content == null
+            ? []
+            : _tokenizeContainerChildren(content, ctx: ctx, loc: loc);
+
+      case 'smartTag':
+      case 'customXml':
+        return _tokenizeContainerChildren(el, ctx: ctx, loc: loc);
+
+      case 'oMath':
+      case 'oMathPara':
+        return [_BlockToken(_parseMathBlock(el, loc: loc), loc: loc)];
+
+      case 'sectPr':
+        return const [];
+
+      default:
+        return _unknownBlockTokens(el, ctx: ctx, loc: loc);
+    }
+  }
+
+  List<_Token> _tokenizeContainerChildren(
+    XmlElement container, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final out = <_Token>[];
+    final kids = container.children.whereType<XmlElement>().toList();
+    for (var i = 0; i < kids.length; i++) {
+      out.addAll(
+        _tokenizeBodyElement(kids[i], ctx: ctx, loc: '$loc:child[$i]'),
+      );
+    }
+    return out;
+  }
+
+  /// Tokenizes a paragraph (`<w:p>`) into a block or list-item token.
+  ///
+  /// Logic flow:
+  /// 1. Style analysis (heading, quote, code).
+  /// 2. Numbering resolution (direct `numPr`, then style-based).
+  /// 3. Inline parsing of runs, hyperlinks, fields, etc.
+  List<_Token> _tokenizeParagraph(
+    XmlElement p, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final pPr = _firstChildByLocal(p, 'pPr');
+    final styleId = _attrLocal(
+      _firstChildByLocal(pPr, 'pStyle'),
+      'val',
+    ); // w:val
+    final numPr = _firstChildByLocal(pPr, 'numPr');
+
+    final indentLeftTwips = _readIndentLeftTwips(pPr);
+
+    if (_isHorizontalRuleParagraph(p, pPr: pPr)) {
+      return [_BlockToken(const HorizontalRuleBlock(), loc: loc)];
+    }
+
+    final analysis = styles.analyzeParagraphStyle(styleId);
+    final override = styleId == null
+        ? null
+        : config.paragraphStyleOverrides[styleId];
+    final isCodeBlock = override?.isCodeBlock ?? analysis.isCodeBlock;
+    final isQuote = override?.isQuote ?? analysis.isQuote;
+    final headingLevel = override?.headingLevel ?? analysis.headingLevel;
+    final isHeading = override?.headingLevel != null
+        ? true
+        : analysis.isHeading;
+    final codeLanguage = override?.codeLanguage;
+
+    if (isCodeBlock) {
+      final codeLine = _extractPlainTextFromParagraph(p);
+      return [
+        _CodeLineToken(
+          codeLine,
+          loc: loc,
+          continuationIndentTwips: indentLeftTwips,
+          language: codeLanguage,
+        ),
+      ];
+    }
+
+    // Check for direct numbering properties or style-inherited numbering
+    String? effectiveNumId;
+    int effectiveIlvl = 0;
+
+    if (numPr != null) {
+      // Direct paragraph numbering
+      effectiveIlvl =
+          int.tryParse(
+            _attrLocal(_firstChildByLocal(numPr, 'ilvl'), 'val') ?? '0',
+          ) ??
+          0;
+      effectiveNumId = _attrLocal(_firstChildByLocal(numPr, 'numId'), 'val');
+    } else if (styleId != null) {
+      // Fallback: check style-level numbering (common in templates)
+      final styleNum = styles.resolveNumberingForStyle(styleId);
+      if (styleNum != null) {
+        effectiveNumId = styleNum.numId;
+        effectiveIlvl = styleNum.ilvl;
+      }
+    }
+
+    if (effectiveNumId != null) {
+      final levelInfo = _numbering.levelInfo(
+        numId: effectiveNumId,
+        ilvl: effectiveIlvl,
+      );
+      final ordered = levelInfo?.ordered ?? false;
+      final startOverride = levelInfo?.startOverride; // Fix list restarts
+
+      final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+
+      // Even if paragraph is empty, keep as list item
+      return [
+        _ListItemToken(
+          ordered: ordered,
+          level: math.max(effectiveIlvl, 0),
+          numId: effectiveNumId,
+          startOverride: startOverride,
+          loc: loc,
+          itemBlocks: [ParagraphBlock(inlines)],
+        ),
+      ];
+    }
+
+    if (isHeading && headingLevel > 0) {
+      final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+      if (_isInlineListEffectivelyEmpty(inlines)) return const [];
+      return [
+        _BlockToken(
+          HeadingBlock(level: headingLevel, inlines: inlines),
+          loc: loc,
+          canContinueList: false,
+        ),
+      ];
+    }
+
+    if (isQuote) {
+      final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+      if (_isInlineListEffectivelyEmpty(inlines)) return const [];
+      return [
+        _BlockToken(
+          QuoteBlock([ParagraphBlock(inlines)]),
+          loc: loc,
+          canContinueList: false,
+        ),
+      ];
+    }
+
+    final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+    final isEmpty = _isInlineListEffectivelyEmpty(inlines);
+    final canContinueList = (indentLeftTwips ?? 0) > 0 && !isEmpty;
+
+    if (isEmpty && !config.preserveEmptyParagraphs) return const [];
+
+    return [
+      _BlockToken(
+        ParagraphBlock(inlines),
+        loc: loc,
+        canContinueList: canContinueList,
+      ),
+    ];
+  }
+
+  // ===========================================================================
+  // Inline parsing
+  // ===========================================================================
+
+  List<Inline> _parseInlinesFromParagraph(
+    XmlElement p, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    return _parseInlineChildren(p, ctx: ctx, loc: loc);
+  }
+
+  /// Parses child elements into a list of [Inline] nodes.
+  ///
+  /// Why complex? Word breaks text into arbitrary runs (`<w:r>`). We must:
+  /// 1. Flatten containers like `smartTag` or `ins`.
+  /// 2. Handle fields (e.g., `HYPERLINK`) via [_FieldState].
+  /// 3. Merge adjacent text runs for clean output.
+  List<Inline> _parseInlineChildren(
+    XmlElement container, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final out = <Inline>[];
+    final activeCommentIds = <String>{};
+    final field = _FieldState();
+
+    void processChildren(XmlElement node, String parentLoc) {
+      final children = node.children.whereType<XmlElement>().toList();
+      for (var i = 0; i < children.length; i++) {
+        final child = children[i];
+        final cLoc = '$parentLoc:${child.name.local}[$i]';
+        _processInlineNode(
+          child,
+          ctx,
+          cLoc,
+          out,
+          field,
+          activeCommentIds,
+          processChildren,
+        );
+      }
+    }
+
+    processChildren(container, loc);
+
+    while (field.isActive) {
+      _finalizeField(out, field, '$loc:end');
+    }
+
+    return _mergeAdjacentText(out);
+  }
+
+  void _processInlineNode(
+    XmlElement child,
+    _ParseContext ctx,
+    String cLoc,
+    List<Inline> out,
+    _FieldState field,
+    Set<String> activeCommentIds,
+    void Function(XmlElement, String) recurse,
+  ) {
+    void push(Inline i) {
+      // NOTE: Removed double hook application here.
+      // Hooks are applied once at the very end.
+      out.add(i);
+    }
+
+    switch (child.name.local) {
+      case 'r':
+        final runs = _parseRun(
+          child,
+          ctx: ctx,
+          loc: cLoc,
+          field: field,
+          commentIds: activeCommentIds,
+        );
+        if (field.isActive && field.inResult) {
+          field.displayInlines.addAll(runs);
+        } else {
+          runs.forEach(push);
+        }
+        while (field.isActive && field.sawEnd) {
+          _finalizeField(out, field, '$cLoc:fldCharEnd');
+        }
+        break;
+
+      // Inline Containers (Recursively Unwrap)
+      case 'smartTag':
+      case 'customXml':
+      case 'ins':
+      case 'bdo':
+      case 'dir':
+        recurse(child, cLoc);
+        break;
+
+      case 'sdt':
+        final content = _firstChildByLocal(child, 'sdtContent');
+        if (content != null) recurse(content, cLoc);
+        break;
+
+      case 'hyperlink':
+        if (field.isActive) _finalizeField(out, field, cLoc);
+        final linkInlines = _parseHyperlink(child, ctx: ctx, loc: cLoc);
+        linkInlines.forEach(push);
+        break;
+
+      case 'fldSimple':
+        if (field.isActive) _finalizeField(out, field, cLoc);
+        final simpleInlines = _parseFldSimple(child, ctx: ctx, loc: cLoc);
+        simpleInlines.forEach(push);
+        break;
+
+      case 'oMath':
+        if (field.isActive) _finalizeField(out, field, cLoc);
+        push(_parseMathInline(child, loc: cLoc));
+        break;
+
+      case 'commentRangeStart':
+        if (config.includeComments) {
+          final id = _attrLocal(child, 'id');
+          if (id != null) activeCommentIds.add(id);
+        }
+        break;
+
+      case 'commentRangeEnd':
+        if (config.includeComments) {
+          final id = _attrLocal(child, 'id');
+          if (id != null && activeCommentIds.remove(id)) {
+            final c = _comments.byId(id);
+            if (c != null) {
+              push(
+                HtmlInline(
+                  '^[${_escapeForComment(c.author)}: ${_escapeForComment(c.text)}]',
+                ),
+              );
+            }
+          }
+        }
+        break;
+
+      case 'bookmarkStart':
+        final name = _attrLocal(child, 'name');
+        if (name != null && !name.startsWith('_')) {
+          push(HtmlInline('<a id="$name"></a>'));
+        }
+        break;
+
+      case 'del':
+        _warn(
+          code: 'trackChanges.deletionDropped',
+          message: 'Dropped deleted text (w:del).',
+          location: cLoc,
+        );
+        break;
+
+      default:
+        // Fallback for unknown containers that might hold text
+        if (child.descendants.whereType<XmlElement>().any(
+          (e) => e.name.local == 'r',
+        )) {
+          recurse(child, cLoc);
+        } else {
+          // If it's truly unknown, use policy
+          final unknown = _unknownInline(child, loc: cLoc);
+          unknown.forEach(push);
+        }
+        break;
+    }
+  }
+
+  void _finalizeField(List<Inline> out, _FieldState field, String loc) {
+    final result = field.finalizeTop(loc: loc);
+    if (result == null) return;
+
+    final emitted = result.produced != null
+        ? <Inline>[result.produced!]
+        : result.displayInlines;
+    if (emitted.isEmpty) return;
+
+    if (field.isActive && field.inResult) {
+      field.displayInlines.addAll(emitted);
+      return;
+    }
+
+    if (!field.isActive) {
+      out.addAll(emitted);
+    }
+  }
+
+  List<Inline> _parseRun(
+    XmlElement r, {
+    required _ParseContext ctx,
+    required String loc,
+    required _FieldState field,
+    required Set<String> commentIds,
+  }) {
+    final out = <Inline>[];
+
+    final fldChar = _firstChildByLocal(r, 'fldChar');
+    if (fldChar != null) {
+      final type = _attrLocal(fldChar, 'fldCharType');
+      if (type == 'begin') {
+        field.begin(loc: loc);
+        return const [];
+      }
+      if (type == 'separate') {
+        field.separate(loc: loc);
+        return const [];
+      }
+      if (type == 'end') {
+        field.end(loc: loc);
+        return const [];
+      }
+    }
+
+    final instrText = _firstChildByLocal(r, 'instrText');
+    if (instrText != null && field.isActive && !field.inResult) {
+      final t = instrText.innerText;
+      if (t.isNotEmpty) field.appendInstr(t);
+      return const [];
+    }
+
+    if (config.includeFootnotes) {
+      final fnRef = _firstChildByLocal(r, 'footnoteReference');
+      if (fnRef != null) {
+        final id = _attrLocal(fnRef, 'id');
+        if (id != null) {
+          return [FootnoteRefInline(id)];
+        }
+      }
+    }
+
+    if (config.includeEndnotes) {
+      final enRef = _firstChildByLocal(r, 'endnoteReference');
+      if (enRef != null) {
+        final id = _attrLocal(enRef, 'id');
+        if (id != null) {
+          return [FootnoteRefInline('endnote:$id')];
+        }
+      }
+    }
+
+    final drawing = _firstChildByLocal(r, 'drawing');
+    if (drawing != null) {
+      final extracted = _parseDrawingAsInline(
+        drawing,
+        ctx: ctx,
+        loc: '$loc:drawing',
+      );
+      if (extracted != null) return extracted;
+    }
+
+    final pict = _firstChildByLocal(r, 'pict');
+    if (pict != null) {
+      final img = _parseVmlImage(pict, ctx: ctx, loc: '$loc:pict');
+      if (img != null) return [img];
+    }
+
+    final sym = _firstChildByLocal(r, 'sym');
+    if (sym != null) {
+      final charHex = _attrLocal(sym, 'char');
+      final decoded = _decodeHexChar(charHex);
+      if (decoded != null) {
+        out.add(TextInline(decoded));
+      }
+    }
+
+    final rPr = _firstChildByLocal(r, 'rPr');
+
+    for (final child in r.children.whereType<XmlElement>()) {
+      switch (child.name.local) {
+        case 't':
+          final text = child.innerText;
+          if (text.isEmpty) break;
+          out.add(_applyRunFormatting(TextInline(text), rPr: rPr, loc: loc));
+          break;
+        case 'tab':
+        case 'ptab':
+          out.add(const TextInline('\t'));
+          break;
+        case 'br':
+        case 'cr':
+          out.add(const LineBreakInline());
+          break;
+        case 'noBreakHyphen':
+          out.add(const TextInline('-'));
+          break;
+        default:
+          break;
+      }
+    }
+
+    if (out.isEmpty) {
+      final txt = r.findAllElements('w:t').map((e) => e.innerText).join();
+      if (txt.isNotEmpty) {
+        out.add(_applyRunFormatting(TextInline(txt), rPr: rPr, loc: loc));
+      }
+    }
+
+    return out;
+  }
+
+  Inline _applyRunFormatting(
+    Inline base, {
+    required XmlElement? rPr,
+    required String loc,
+  }) {
+    if (rPr == null) return base;
+
+    if (_isCodeRun(rPr)) {
+      if (base case TextInline(:final text)) {
+        return CodeInline(text);
+      }
+      return HtmlInline(_inlineToPlainText(base));
+    }
+
+    final bold = _isOnOff(rPr, 'b');
+    final italic = _isOnOff(rPr, 'i');
+    final strike = _firstChildByLocal(rPr, 'strike') != null;
+    final underline = _firstChildByLocal(rPr, 'u') != null;
+
+    final vertAlign = _attrLocal(_firstChildByLocal(rPr, 'vertAlign'), 'val');
+
+    Inline node = base;
+
+    if (underline) node = UnderlineInline([node]);
+    if (strike) node = StrikeInline([node]);
+    if (italic) node = EmphInline([node]);
+    if (bold) node = StrongInline([node]);
+
+    if (vertAlign == 'subscript') node = SubInline([node]);
+    if (vertAlign == 'superscript') node = SupInline([node]);
+
+    return node;
+  }
+
+  bool _isOnOff(XmlElement rPr, String childLocalName) {
+    final el = _firstChildByLocal(rPr, childLocalName);
+    if (el == null) return false;
+    final v = _attrLocal(el, 'val');
+    return v == null || v.toLowerCase() != 'false' && v != '0';
+  }
+
+  bool _isCodeRun(XmlElement rPr) {
+    final fonts = _firstChildByLocal(rPr, 'rFonts');
+    final ascii = _attrLocal(fonts, 'ascii');
+    final hAnsi = _attrLocal(fonts, 'hAnsi');
+    final cs = _attrLocal(fonts, 'cs');
+    if (_fontLooksMonospace(ascii) ||
+        _fontLooksMonospace(hAnsi) ||
+        _fontLooksMonospace(cs)) {
+      return true;
+    }
+    if (config.treatShadedRunsAsCode &&
+        _firstChildByLocal(rPr, 'shd') != null) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _fontLooksMonospace(String? font) {
+    if (font == null) return false;
+    final f = font.trim().toLowerCase();
+    if (f.isEmpty) return false;
+
+    for (final hint in config.monospaceFonts) {
+      final h = hint.trim().toLowerCase();
+      if (h.isEmpty) continue;
+      if (f == h || f.contains(h)) return true;
+    }
+    return false;
+  }
+
+  List<Inline> _parseHyperlink(
+    XmlElement hyperlink, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final rid = _attrLocal(hyperlink, 'id');
+    final anchor = _attrLocal(hyperlink, 'anchor');
+
+    // Recursively parse children (could contain runs with formatting)
+    final children = _parseInlineChildren(hyperlink, ctx: ctx, loc: loc);
+
+    if (children.isEmpty) return const [];
+
+    if (anchor != null && anchor.isNotEmpty) {
+      return [LinkInline(url: '#$anchor', children: children)];
+    }
+
+    if (rid != null) {
+      // PART-AWARE RESOLUTION
+      final target = package.resolveRelTarget(ctx.partPath, rid);
+      if (target != null && target.isNotEmpty) {
+        return [LinkInline(url: target, children: children)];
+      }
+    }
+
+    return children;
+  }
+
+  List<Inline> _parseFldSimple(
+    XmlElement fldSimple, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final instr = _attrLocal(fldSimple, 'instr');
+    if (instr == null || instr.isEmpty) return const [];
+
+    final url = _extractHyperlinkUrl(instr);
+    final anchor = _extractHyperlinkAnchor(instr);
+
+    // Recursively parse children
+    final children = _parseInlineChildren(fldSimple, ctx: ctx, loc: loc);
+
+    if (children.isEmpty) {
+      if (url != null) {
+        return [
+          LinkInline(url: url, children: [TextInline(url)]),
+        ];
+      }
+      if (anchor != null) {
+        return [
+          LinkInline(url: '#$anchor', children: [TextInline(anchor)]),
+        ];
+      }
+      return const [];
+    }
+
+    if (url != null) {
+      return [LinkInline(url: url, children: children)];
+    }
+    if (anchor != null) {
+      return [LinkInline(url: '#$anchor', children: children)];
+    }
+
+    return children;
+  }
+
+  List<Inline>? _parseDrawingAsInline(
+    XmlElement drawing, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final blip = drawing.descendants.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == 'blip',
+    );
+    final embed = blip != null ? _attrLocal(blip, 'embed') : null;
+    if (embed != null) {
+      // PART-AWARE RESOLUTION
+      final src = _resolveMediaTarget(embed, ctx: ctx);
+      if (src != null) {
+        final alt =
+            drawing.descendants
+                .whereType<XmlElement>()
+                .firstWhereOrNull((e) => e.name.local == 'cNvPr')
+                ?.attributes
+                .firstWhereOrNull((a) => a.name.local == 'descr')
+                ?.value ??
+            'Image';
+
+        return [ImageInline(src: src, alt: alt)];
+      }
+    }
+
+    final txbxContent = drawing.descendants
+        .whereType<XmlElement>()
+        .firstWhereOrNull((e) => e.name.local == 'txbxContent');
+    if (txbxContent != null) {
+      _warn(
+        code: 'textbox.flattened',
+        message: 'Flattened textbox content into inline text.',
+        location: loc,
+      );
+
+      final paras = txbxContent.children
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 'p')
+          .toList();
+      final inlines = <Inline>[];
+
+      for (var i = 0; i < paras.length; i++) {
+        final p = paras[i];
+        final pInlines = _parseInlinesFromParagraph(
+          p,
+          ctx: ctx,
+          loc: '$loc:txbx:p[$i]',
+        );
+        inlines.addAll(pInlines);
+
+        if (i != paras.length - 1) {
+          inlines.add(const LineBreakInline());
+          inlines.add(const LineBreakInline());
+        }
+      }
+
+      return _mergeAdjacentText(inlines);
+    }
+
+    return null;
+  }
+
+  ImageInline? _parseVmlImage(
+    XmlElement pict, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final imgData = pict.descendants.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == 'imagedata',
+    );
+    if (imgData == null) return null;
+
+    final rid = _attrLocal(imgData, 'id');
+    if (rid == null) return null;
+
+    final src = _resolveMediaTarget(rid, ctx: ctx);
+    if (src == null) return null;
+
+    final alt = 'Image';
+    return ImageInline(src: src, alt: alt);
+  }
+
+  // ===========================================================================
+  // Tables
+  // ===========================================================================
+
+  /// Parses a table (`<w:tbl>`).
+  ///
+  /// Strategy:
+  /// - If complex (merged cells) and [DocxToMarkdownConfig.tableMode] allows,
+  ///   fall back to HTML to preserve structure.
+  /// - Otherwise attempt a best-effort grid parse for Markdown tables.
+  Block _parseTable(
+    XmlElement tbl, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final forceHtml = config.tableMode == TableMode.htmlOnly;
+
+    final hasVMerge = tbl.descendants.whereType<XmlElement>().any(
+      (e) => e.name.local == 'vMerge',
+    );
+    final hasGridSpan = tbl.descendants.whereType<XmlElement>().any(
+      (e) => e.name.local == 'gridSpan',
+    );
+
+    final complex = hasVMerge || hasGridSpan;
+
+    if (forceHtml || (config.tableMode == TableMode.auto && complex)) {
+      return HtmlBlock(_renderTableAsHtml(tbl, ctx: ctx, loc: loc));
+    }
+
+    return _parseTableAsGridBestEffort(tbl, ctx: ctx, loc: loc);
+  }
+
+  String _renderTableAsHtml(
+    XmlElement tbl, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final sb = StringBuffer()..writeln('<table>');
+    final rows = tbl.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'tr')
+        .toList();
+
+    final rowCells = <List<_HtmlTableCellInfo>>[];
+    for (var r = 0; r < rows.length; r++) {
+      final tr = rows[r];
+      final tcs = tr.children
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 'tc')
+          .toList();
+
+      var colIndex = 0;
+      final cells = <_HtmlTableCellInfo>[];
+
+      for (var c = 0; c < tcs.length; c++) {
+        final tc = tcs[c];
+        final tcPr = _firstChildByLocal(tc, 'tcPr');
+
+        final gridSpan =
+            int.tryParse(
+              _attrLocal(_firstChildByLocal(tcPr, 'gridSpan'), 'val') ?? '1',
+            ) ??
+            1;
+
+        final vMergeEl = _firstChildByLocal(tcPr, 'vMerge');
+        final vMergeVal = _attrLocal(vMergeEl, 'val');
+        final vMerge = vMergeEl == null
+            ? _VMergeType.none
+            : (vMergeVal == 'restart'
+                  ? _VMergeType.restart
+                  : _VMergeType.continueCell);
+
+        cells.add(
+          _HtmlTableCellInfo(
+            tc: tc,
+            rowIndex: r,
+            cellIndex: c,
+            colIndex: colIndex,
+            colSpan: gridSpan,
+            vMerge: vMerge,
+          ),
+        );
+
+        colIndex += gridSpan;
+      }
+
+      rowCells.add(cells);
+    }
+
+    int? rowSpanForCell(_HtmlTableCellInfo cell) {
+      if (cell.vMerge != _VMergeType.restart) return null;
+      var span = 1;
+      for (var r = cell.rowIndex + 1; r < rowCells.length; r++) {
+        final nextRow = rowCells[r];
+        final next = nextRow.firstWhereOrNull(
+          (c) => c.colIndex == cell.colIndex,
+        );
+        if (next == null) break;
+        if (next.vMerge != _VMergeType.continueCell) break;
+        if (next.colSpan != cell.colSpan) break;
+        span++;
+      }
+      return span > 1 ? span : null;
+    }
+
+    for (var r = 0; r < rowCells.length; r++) {
+      sb.writeln('  <tr>');
+      for (final cell in rowCells[r]) {
+        if (cell.vMerge == _VMergeType.continueCell) continue;
+
+        final attrs = <String>[];
+        if (cell.colSpan > 1) attrs.add('colspan="${cell.colSpan}"');
+        final rowSpan = rowSpanForCell(cell);
+        if (rowSpan != null) attrs.add('rowspan="$rowSpan"');
+
+        final cellBlocks = _parseBlocksFromContainer(
+          cell.tc,
+          ctx: ctx,
+          loc: '$loc:tc[${cell.rowIndex},${cell.cellIndex}]',
+        );
+        final inner = _renderBlocksAsHtml(cellBlocks).trim();
+
+        sb.writeln(
+          '    <td${attrs.isEmpty ? '' : ' ${attrs.join(' ')}'}>$inner</td>',
+        );
+      }
+      sb.writeln('  </tr>');
+    }
+
+    sb.writeln('</table>');
+    return sb.toString();
+  }
+
+  TableBlock _parseTableAsGridBestEffort(
+    XmlElement tbl, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final rows = <TableRow>[];
+    final alignments = <TableAlign>[];
+    final trList = tbl.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'tr')
+        .toList();
+
+    for (var r = 0; r < trList.length; r++) {
+      final tr = trList[r];
+      final trPr = _firstChildByLocal(tr, 'trPr');
+      final isHeader =
+          trPr != null && _firstChildByLocal(trPr, 'tblHeader') != null;
+
+      final cells = <TableCell>[];
+      final tcList = tr.children
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 'tc')
+          .toList();
+
+      for (var c = 0; c < tcList.length; c++) {
+        final tc = tcList[c];
+        final cellBlocks = _parseBlocksFromContainer(
+          tc,
+          ctx: ctx,
+          loc: '$loc:tc[$r,$c]',
+        );
+        cells.add(TableCell(blocks: cellBlocks, isHeader: isHeader));
+        if (r == 0) {
+          alignments.add(_readTableCellAlignment(tc));
+        }
+      }
+
+      rows.add(TableRow(cells: cells, isHeader: isHeader));
+    }
+
+    return TableBlock(
+      grid: TableGrid(rows: rows),
+      alignments: alignments,
+    );
+  }
+
+  TableAlign _readTableCellAlignment(XmlElement tc) {
+    final p = tc.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == 'p',
+    );
+    final pPr = _firstChildByLocal(p, 'pPr');
+    final jc = _attrLocal(_firstChildByLocal(pPr, 'jc'), 'val');
+    return _tableAlignFromJc(jc);
+  }
+
+  TableAlign _tableAlignFromJc(String? val) {
+    switch ((val ?? '').toLowerCase()) {
+      case 'center':
+        return TableAlign.center;
+      case 'right':
+        return TableAlign.right;
+      case 'left':
+        return TableAlign.left;
+      default:
+        return TableAlign.auto;
+    }
+  }
+
+  List<Block> _parseBlocksFromContainer(
+    XmlElement container, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    final builder = _TokenBuilder(warn: _warn, config: config);
+    final kids = container.children.whereType<XmlElement>().toList();
+    for (var i = 0; i < kids.length; i++) {
+      builder.consumeAll(
+        _tokenizeBodyElement(kids[i], ctx: ctx, loc: '$loc:child[$i]'),
+      );
+    }
+    builder.finish();
+    return builder.outputBlocks;
+  }
+
+  List<Block> _parseHeadersOrFooters(
+    XmlElement body, {
+    required bool isHeader,
+  }) {
+    final blocks = <Block>[];
+    final sections = body.descendants.whereType<XmlElement>().where(
+      (e) => e.name.local == 'sectPr',
+    );
+    final processedIds = <String>{};
+
+    for (final sect in sections) {
+      final tag = isHeader ? 'headerReference' : 'footerReference';
+      final ref =
+          sect.children.whereType<XmlElement>().firstWhereOrNull(
+            (e) => e.name.local == tag && _attrLocal(e, 'type') == 'default',
+          ) ??
+          sect.children.whereType<XmlElement>().firstWhereOrNull(
+            (e) => e.name.local == tag,
+          );
+
+      if (ref != null) {
+        final rId = _attrLocal(ref, 'id');
+        if (rId != null && processedIds.add(rId)) {
+          // PART-AWARE: Resolve relative to main document
+          final target = package.resolveDocumentRelTarget(rId);
+          if (target != null) {
+            final xml = package.tryLoadXml(target);
+            if (xml != null) {
+              // Switch context to header/footer part
+              final ctx = _ParseContext(partPath: target);
+              blocks.addAll(
+                _parseBlocksFromContainer(
+                  xml.rootElement,
+                  ctx: ctx,
+                  loc: target,
+                ),
+              );
+            }
+          }
+        }
+      }
+    }
+    return blocks;
+  }
+
+  // ===========================================================================
+  // Math
+  // ===========================================================================
+
+  Block _parseMathBlock(XmlElement math, {required String loc}) {
+    final latex =
+        config.hooks.ommlToLatex?.call(math.toXmlString()) ??
+        _OmmlToLatex.convert(math);
+    return MathBlock(latex);
+  }
+
+  Inline _parseMathInline(XmlElement math, {required String loc}) {
+    final latex =
+        config.hooks.ommlToLatex?.call(math.toXmlString()) ??
+        _OmmlToLatex.convert(math);
+    return HtmlInline('\$$latex\$');
+  }
+
+  // ===========================================================================
+  // Footnotes / Endnotes
+  // ===========================================================================
+
+  Map<String, FootnoteDefinition> _parseFootnotes() {
+    final xml = package.footnotesXml;
+    if (xml == null) return {};
+
+    // PART-AWARE
+    final ctx = _ParseContext(partPath: package.footnotesPartPath!);
+
+    final out = <String, FootnoteDefinition>{};
+    final footnotes = xml.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'footnote')
+        .toList();
+
+    for (var i = 0; i < footnotes.length; i++) {
+      final fn = footnotes[i];
+      final id = _attrLocal(fn, 'id');
+      if (id == null) continue;
+
+      final numeric = int.tryParse(id) ?? -1;
+      if (numeric <= 0) continue;
+
+      final blocks = _parseBlocksFromContainer(
+        fn,
+        ctx: ctx,
+        loc: 'footnotes.xml:footnote[$id]',
+      );
+      if (blocks.isEmpty) continue;
+      out[id] = FootnoteDefinition(id: id, blocks: blocks);
+    }
+
+    return out;
+  }
+
+  Map<String, FootnoteDefinition> _parseEndnotesAsFootnotes() {
+    final xml = package.endnotesXml;
+    if (xml == null) return {};
+
+    // PART-AWARE
+    final ctx = _ParseContext(partPath: package.endnotesPartPath!);
+
+    final out = <String, FootnoteDefinition>{};
+    final endnotes = xml.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'endnote')
+        .toList();
+
+    for (var i = 0; i < endnotes.length; i++) {
+      final en = endnotes[i];
+      final id = _attrLocal(en, 'id');
+      if (id == null) continue;
+
+      final numeric = int.tryParse(id) ?? -1;
+      if (numeric <= 0) continue;
+
+      final blocks = _parseBlocksFromContainer(
+        en,
+        ctx: ctx,
+        loc: 'endnotes.xml:endnote[$id]',
+      );
+      if (blocks.isEmpty) continue;
+
+      final key = 'endnote:$id';
+      out[key] = FootnoteDefinition(id: key, blocks: blocks);
+    }
+
+    return out;
+  }
+
+  // ===========================================================================
+  // Unknown element fallbacks
+  // ===========================================================================
+
+  List<_Token> _unknownBlockTokens(
+    XmlElement el, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
+    _warn(
+      code: 'unsupported.block',
+      message: 'Unsupported block element: ${el.name.qualified}',
+      location: loc,
+    );
+
+    switch (config.unknownElementPolicy) {
+      case UnknownElementPolicy.drop:
+        return const [];
+
+      case UnknownElementPolicy.keepText:
+        final nested = _parseBlocksFromContainer(
+          el,
+          ctx: ctx,
+          loc: '$loc:nested',
+        );
+        if (nested.isNotEmpty) {
+          return nested.map((b) => _BlockToken(b, loc: loc)).toList();
+        }
+
+        final txt = el.innerText.trim();
+        if (txt.isEmpty) return const [];
+        return [
+          _BlockToken(ParagraphBlock([TextInline(txt)]), loc: loc),
+        ];
+
+      case UnknownElementPolicy.keepHtml:
+        final xmlString = _truncateXml(el.toXmlString(pretty: false));
+        return [
+          _BlockToken(HtmlBlock('<!-- Unsupported: $xmlString -->'), loc: loc),
+        ];
+    }
+  }
+
+  List<Inline> _unknownInline(XmlElement el, {required String loc}) {
+    _warn(
+      code: 'unsupported.inline',
+      message: 'Unsupported inline element: ${el.name.qualified}',
+      location: loc,
+    );
+
+    switch (config.unknownElementPolicy) {
+      case UnknownElementPolicy.drop:
+        return const [];
+
+      case UnknownElementPolicy.keepText:
+        final txt = el.innerText;
+        if (txt.isEmpty) return const [];
+        return [TextInline(txt)];
+
+      case UnknownElementPolicy.keepHtml:
+        final xmlString = _truncateXml(el.toXmlString(pretty: false));
+        return [HtmlInline('<!-- $xmlString -->')];
+    }
+  }
+
+  // ===========================================================================
+  // Helpers
+  // ===========================================================================
+
+  // ... (keep _extractPlainTextFromParagraph, _isInlineListEffectivelyEmpty, _isHorizontalRuleParagraph, _readIndentLeftTwips)
+  // Re-pasting for completeness in rewrite
+
+  String _extractPlainTextFromParagraph(XmlElement p) {
+    final sb = StringBuffer();
+
+    void handleRun(XmlElement r) {
+      for (final ch in r.children.whereType<XmlElement>()) {
+        switch (ch.name.local) {
+          case 't':
+            sb.write(ch.innerText);
+            break;
+          case 'tab':
+          case 'ptab':
+            sb.write('\t');
+            break;
+          case 'br':
+          case 'cr':
+            sb.write('\n');
+            break;
+          case 'noBreakHyphen':
+            sb.write('-');
+            break;
+          default:
+            break;
+        }
+      }
+    }
+
+    // Simple extraction not recursive for code blocks (usually flat)
+    for (final child in p.children.whereType<XmlElement>()) {
+      switch (child.name.local) {
+        case 'r':
+          handleRun(child);
+          break;
+        case 'hyperlink':
+          for (final r in child.children.whereType<XmlElement>().where(
+            (e) => e.name.local == 'r',
+          )) {
+            handleRun(r);
+          }
+          break;
+        default:
+          break;
+      }
+    }
+    return sb.toString();
+  }
+
+  bool _isInlineListEffectivelyEmpty(List<Inline> inlines) {
+    if (inlines.isEmpty) return true;
+    final txt = _inlineListToPlainText(inlines).trim();
+    return txt.isEmpty;
+  }
+
+  bool _isHorizontalRuleParagraph(XmlElement p, {required XmlElement? pPr}) {
+    final pBdr = _firstChildByLocal(pPr, 'pBdr');
+    if (pBdr != null) {
+      final bottom = _firstChildByLocal(pBdr, 'bottom');
+      final top = _firstChildByLocal(pBdr, 'top');
+      if (bottom != null || top != null) {
+        final txt = p.descendants
+            .whereType<XmlElement>()
+            .where((e) => e.name.local == 't')
+            .map((e) => e.innerText)
+            .join();
+        if (txt.trim().isEmpty) return true;
+      }
+    }
+    final txt = p.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 't')
+        .map((e) => e.innerText)
+        .join()
+        .trim();
+    if (txt == '---' || txt == '***') return true;
+    return false;
+  }
+
+  int? _readIndentLeftTwips(XmlElement? pPr) {
+    final ind = _firstChildByLocal(pPr, 'ind');
+    if (ind == null) return null;
+    final left = _attrLocal(ind, 'left');
+    return int.tryParse(left ?? '');
+  }
+
+  String? _resolveMediaTarget(String rId, {required _ParseContext ctx}) {
+    // PART-AWARE
+    final target = package.resolveRelTarget(ctx.partPath, rId);
+    if (target == null || target.isEmpty) return null;
+
+    final uri = Uri.tryParse(target);
+    if (uri != null && uri.hasScheme) {
+      return target;
+    }
+
+    var t = target.replaceAll('\\', '/');
+    while (t.startsWith('./')) {
+      t = t.substring(2);
+    }
+    while (t.startsWith('../')) {
+      t = t.substring(3);
+    }
+
+    final partPath = t.startsWith('word/') ? t : 'word/$t';
+    final mapped = mediaMap[partPath];
+    if (mapped != null && mapped.isNotEmpty) return mapped;
+    return t.split('/').last;
+  }
+
+  List<Block> _applyHooksToBlocks(
+    List<Block> blocks, {
+    required String baseLoc,
+  }) {
+    final out = <Block>[];
+    for (var i = 0; i < blocks.length; i++) {
+      final b = _applyHooksToBlock(blocks[i], loc: '$baseLoc:block[$i]');
+      if (b != null) out.add(b);
+    }
+    return out;
+  }
+
+  Block? _applyHooksToBlock(Block block, {required String loc}) {
+    final normalized = switch (block) {
+      ParagraphBlock() => ParagraphBlock(
+        _applyHooksToInlines(block.inlines, loc: '$loc:para'),
+      ),
+      HeadingBlock() => HeadingBlock(
+        level: block.level,
+        inlines: _applyHooksToInlines(block.inlines, loc: '$loc:heading'),
+      ),
+      QuoteBlock() => QuoteBlock(
+        _applyHooksToBlocks(block.blocks, baseLoc: '$loc:quote'),
+      ),
+      ListBlock() => ListBlock(
+        ordered: block.ordered,
+        start: block.start,
+        tightness: block.tightness,
+        items: block.items
+            .mapIndexed(
+              (idx, it) => ListItem(
+                blocks: _applyHooksToBlocks(
+                  it.blocks,
+                  baseLoc: '$loc:listItem[$idx]',
+                ),
+              ),
+            )
+            .toList(),
+      ),
+      TableBlock() => TableBlock(
+        grid: TableGrid(
+          rows: block.grid.rows
+              .mapIndexed(
+                (r, row) => TableRow(
+                  cells: row.cells
+                      .mapIndexed(
+                        (c, cell) => TableCell(
+                          blocks: _applyHooksToBlocks(
+                            cell.blocks,
+                            baseLoc: '$loc:cell[$r,$c]',
+                          ),
+                          colSpan: cell.colSpan,
+                          rowSpan: cell.rowSpan,
+                          isHeader: cell.isHeader,
+                        ),
+                      )
+                      .toList(),
+                  isHeader: row.isHeader,
+                ),
+              )
+              .toList(),
+        ),
+        alignments: block.alignments,
+      ),
+      _ => block,
+    };
+    final transformed = config.hooks.transformBlock?.call(
+      normalized,
+      HookContext(location: loc),
+    );
+    return transformed ?? normalized;
+  }
+
+  List<Inline> _applyHooksToInlines(
+    List<Inline> inlines, {
+    required String loc,
+  }) {
+    final out = <Inline>[];
+    for (var i = 0; i < inlines.length; i++) {
+      final n = _applyHooksToInline(inlines[i], loc: '$loc:inline[$i]');
+      if (n != null) out.add(n);
+    }
+    return _mergeAdjacentText(out);
+  }
+
+  Inline? _applyHooksToInline(Inline node, {required String loc}) {
+    final normalized = switch (node) {
+      StrongInline() => StrongInline(
+        _applyHooksToInlines(node.children, loc: '$loc:strong'),
+      ),
+      EmphInline() => EmphInline(
+        _applyHooksToInlines(node.children, loc: '$loc:emph'),
+      ),
+      StrikeInline() => StrikeInline(
+        _applyHooksToInlines(node.children, loc: '$loc:strike'),
+      ),
+      UnderlineInline() => UnderlineInline(
+        _applyHooksToInlines(node.children, loc: '$loc:underline'),
+      ),
+      LinkInline() => LinkInline(
+        url: node.url,
+        children: _applyHooksToInlines(node.children, loc: '$loc:link'),
+      ),
+      SupInline() => SupInline(
+        _applyHooksToInlines(node.children, loc: '$loc:sup'),
+      ),
+      SubInline() => SubInline(
+        _applyHooksToInlines(node.children, loc: '$loc:sub'),
+      ),
+      _ => node,
+    };
+    return config.hooks.transformInline?.call(
+          normalized,
+          HookContext(location: loc),
+        ) ??
+        normalized;
+  }
+
+  void _warn({
+    required String code,
+    required String message,
+    required String location,
+  }) {
+    var part = 'unknown';
+    var path = location;
+    final idx = location.indexOf(':');
+    if (idx != -1) {
+      part = location.substring(0, idx);
+      path = location.substring(idx + 1);
+    }
+    final w = DocWarning(
+      code: code,
+      message: message,
+      location: SourceLocation(part: part, path: path),
+    );
+    _warnings.add(w);
+    onWarning(w);
+  }
+
+  XmlElement? _firstChildByLocal(XmlElement? parent, String local) {
+    if (parent == null) return null;
+    return parent.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == local,
+    );
+  }
+
+  XmlElement? _firstDescendantByLocal(XmlNode parent, String local) {
+    return parent.descendants.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == local,
+    );
+  }
+
+  String? _attrLocal(XmlElement? el, String localName) {
+    if (el == null) return null;
+    final a = el.attributes.firstWhereOrNull((a) => a.name.local == localName);
+    return a?.value;
+  }
+
+  String? _decodeHexChar(String? hex) {
+    if (hex == null) return null;
+    final cleaned = hex.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+    if (cleaned.isEmpty) return null;
+    final v = int.tryParse(cleaned, radix: 16);
+    if (v == null) return null;
+    return String.fromCharCode(v);
+  }
+
+  String _truncateXml(String xml, {int maxLen = 2000}) {
+    if (xml.length <= maxLen) return xml;
+    return '${xml.substring(0, maxLen)}…';
+  }
+
+  String _escapeForComment(String s) {
+    return s.replaceAll('\n', ' ').replaceAll('\r', ' ').trim();
+  }
+
+  String _inlineToPlainText(Inline i) => switch (i) {
+    TextInline() => i.text,
+    CodeInline() => i.text,
+    LineBreakInline() => '\n',
+    FootnoteRefInline() => '[^${i.id}]',
+    ImageInline() => i.alt,
+    LinkInline() => _inlineListToPlainText(i.children),
+    StrongInline() => _inlineListToPlainText(i.children),
+    EmphInline() => _inlineListToPlainText(i.children),
+    StrikeInline() => _inlineListToPlainText(i.children),
+    UnderlineInline() => _inlineListToPlainText(i.children),
+    SupInline() => _inlineListToPlainText(i.children),
+    SubInline() => _inlineListToPlainText(i.children),
+    HtmlInline() => i.html,
+    _ => '',
+  };
+
+  String _inlineListToPlainText(List<Inline> list) =>
+      list.map(_inlineToPlainText).join();
+
+  List<Inline> _mergeAdjacentText(List<Inline> inlines) {
+    if (inlines.isEmpty) return inlines;
+    final out = <Inline>[];
+    TextInline? pending;
+    void flush() {
+      if (pending != null) {
+        out.add(pending!);
+        pending = null;
+      }
+    }
+
+    for (final i in inlines) {
+      if (i is TextInline) {
+        if (pending == null) {
+          pending = TextInline(i.text);
+        } else {
+          pending = TextInline('${pending!.text}${i.text}');
+        }
+      } else {
+        flush();
+        out.add(i);
+      }
+    }
+    flush();
+    return out;
+  }
+
+  String _renderBlocksAsHtml(List<Block> blocks) {
+    final sb = StringBuffer();
+    for (final b in blocks) {
+      switch (b) {
+        case ParagraphBlock():
+          sb.write(_escapeHtml(_inlineListToPlainText(b.inlines)));
+          sb.write('<br/>');
+          break;
+        case HeadingBlock():
+          sb.write(
+            '<strong>${_escapeHtml(_inlineListToPlainText(b.inlines))}</strong><br/>',
+          );
+          break;
+        case CodeBlock():
+          sb.write('<pre><code>${_escapeHtml(b.text)}</code></pre>');
+          break;
+        case ListBlock():
+          sb.write(b.ordered ? '<ol>' : '<ul>');
+          for (final it in b.items) {
+            sb.write('<li>${_renderBlocksAsHtml(it.blocks)}</li>');
+          }
+          sb.write(b.ordered ? '</ol>' : '</ul>');
+          break;
+        case QuoteBlock():
+          sb.write('<blockquote>${_renderBlocksAsHtml(b.blocks)}</blockquote>');
+          break;
+        case TableBlock():
+          sb.write('<table>');
+          for (final row in b.grid.rows) {
+            sb.write('<tr>');
+            for (final cell in row.cells) {
+              sb.write('<td>${_renderBlocksAsHtml(cell.blocks)}</td>');
+            }
+            sb.write('</tr>');
+          }
+          sb.write('</table>');
+          break;
+        case HorizontalRuleBlock():
+          sb.write('<hr/>');
+          break;
+        case HtmlBlock():
+          sb.write(b.html);
+          break;
+        case MathBlock():
+          sb.write('<span class="math">${_escapeHtml(b.latexOrText)}</span>');
+          break;
+        default:
+          break;
+      }
+    }
+    return sb.toString();
+  }
+
+  String _escapeHtml(String s) {
+    return s
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+  }
+}
+
+// ============================================================================
+// Token builder (groups list items + code lines into structured IR blocks)
+// ============================================================================
+
+sealed class _Token {}
+
+class _BlockToken extends _Token {
+  _BlockToken(this.block, {required this.loc, this.canContinueList = false});
+  final Block block;
+  final String loc;
+  final bool canContinueList;
+}
+
+class _ListItemToken extends _Token {
+  _ListItemToken({
+    required this.ordered,
+    required this.level,
+    required this.numId,
+    this.startOverride, // New
+    required this.itemBlocks,
+    required this.loc,
+  });
+
+  final bool ordered;
+  final int level;
+  final String numId;
+  final int? startOverride;
+  final List<Block> itemBlocks;
+  final String loc;
+}
+
+class _CodeLineToken extends _Token {
+  _CodeLineToken(
+    this.line, {
+    required this.loc,
+    required this.continuationIndentTwips,
+    this.language,
+  });
+  final String line;
+  final String loc;
+  final int? continuationIndentTwips;
+  final String? language;
+}
+
+// ============================================================================
+// Builder nodes (mutable) -> converted to immutable IR Blocks at the end.
+// ============================================================================
+
+sealed class _BNode {
+  Block toBlock();
+}
+
+final class _BLeaf implements _BNode {
+  _BLeaf(this.block);
+  final Block block;
+
+  @override
+  Block toBlock() => block;
+}
+
+final class _BList implements _BNode {
+  _BList({required this.ordered, required this.start, required this.tightness});
+
+  bool ordered;
+  int start;
+  ListTightness tightness;
+
+  final List<_BListItem> items = [];
+
+  @override
+  Block toBlock() {
+    return ListBlock(
+      ordered: ordered,
+      start: start,
+      tightness: tightness,
+      items: items.map((it) => it.toListItem()).toList(growable: false),
+    );
+  }
+}
+
+final class _BListItem {
+  _BListItem({Iterable<_BNode> blocks = const []}) {
+    this.blocks.addAll(blocks);
+  }
+
+  final List<_BNode> blocks = [];
+
+  ListItem toListItem() {
+    return ListItem(
+      blocks: blocks.map((b) => b.toBlock()).toList(growable: false),
+    );
+  }
+}
+
+final class _BListEntry {
+  _BListEntry({required this.list, required this.numId});
+  final _BList list;
+  final String numId;
+}
+
+final class _CodeAccumulator {
+  _CodeAccumulator(this.container, {this.language});
+  final List<_BNode> container;
+  String? language;
+  final StringBuffer buffer = StringBuffer();
+  void addLine(String line) => buffer.writeln(line);
+}
+
+/// Consumes a stream of tokens to build a structured [Block] tree.
+///
+/// Why: This state machine groups list items into [ListBlock]s, merges
+/// consecutive code lines into a single [CodeBlock], and normalizes list
+/// nesting levels for renderer-friendly output.
+class _TokenBuilder {
+  _TokenBuilder({required this.warn, required this.config});
+
+  final void Function({
+    required String code,
+    required String message,
+    required String location,
+  })
+  warn;
+  final DocxToMarkdownConfig config;
+  final List<_BNode> _top = [];
+  final List<_BListEntry> _listStack = [];
+  _CodeAccumulator? _code;
+
+  List<Block> get outputBlocks =>
+      _top.map((n) => n.toBlock()).toList(growable: false);
+
+  void consumeAll(List<_Token> tokens) {
+    for (final t in tokens) {
+      _consume(t);
+    }
+  }
+
+  void finish() {
+    _flushCode();
+    _closeAllLists();
+  }
+
+  void _consume(_Token t) {
+    switch (t) {
+      case _ListItemToken():
+        _flushCode();
+        _addListItem(t);
+        return;
+      case _CodeLineToken():
+        _handleCodeLine(t);
+        return;
+      case _BlockToken():
+        if (_listStack.isNotEmpty && t.canContinueList) {
+          _flushCode();
+          _currentListItemBlocks().add(_BLeaf(t.block));
+          return;
+        }
+        _flushCode();
+        _closeAllLists();
+        _top.add(_BLeaf(t.block));
+        return;
+    }
+  }
+
+  void _handleCodeLine(_CodeLineToken t) {
+    final inList =
+        _listStack.isNotEmpty && (t.continuationIndentTwips ?? 0) > 0;
+    final container = inList ? _currentListItemBlocks() : _top;
+    if (_code != null && !identical(_code!.container, container)) _flushCode();
+    if (_code != null &&
+        t.language != null &&
+        _code!.language != null &&
+        _code!.language != t.language) {
+      _flushCode();
+    }
+    _code ??= _CodeAccumulator(container, language: t.language);
+    if (_code!.language == null && t.language != null) {
+      _code!.language = t.language;
+    }
+    _code!.addLine(t.line);
+  }
+
+  void _flushCode() {
+    final c = _code;
+    if (c == null) return;
+    final text = c.buffer.toString().replaceAll(RegExp(r'\n+$'), '');
+    if (text.isNotEmpty) {
+      c.container.add(_BLeaf(CodeBlock(text: text, language: c.language)));
+    }
+    _code = null;
+  }
+
+  void _addListItem(_ListItemToken t) {
+    var level = math.max(0, t.level);
+
+    if (_listStack.isEmpty && level > 0) {
+      warn(
+        code: 'list.level.normalized',
+        message:
+            'List starts at level $level; normalized to level 0 for stability.',
+        location: t.loc,
+      );
+      level = 0;
+    }
+
+    // Reduce stack if deeper than needed
+    while (_listStack.length > level + 1) {
+      _listStack.removeLast();
+    }
+
+    // Check for restart (change of numId) or explicit startOverride at the same level
+    if (_listStack.length == level + 1) {
+      final top = _listStack.last;
+      bool restart = top.numId != t.numId;
+      if (!restart && t.startOverride != null) restart = true;
+
+      if (restart) _listStack.removeLast();
+    }
+
+    // Open missing list levels
+    while (_listStack.length < level + 1) {
+      final ordered = (_listStack.length == level) ? t.ordered : false;
+      final start = (t.startOverride != null && _listStack.length == level)
+          ? t.startOverride!
+          : 1;
+
+      final listBlock = _BList(
+        ordered: ordered,
+        start: start,
+        tightness: ListTightness.auto,
+      );
+
+      if (_listStack.isEmpty) {
+        _top.add(listBlock);
+      } else {
+        _currentListItemBlocks().add(listBlock);
+      }
+
+      _listStack.add(_BListEntry(list: listBlock, numId: t.numId));
+    }
+
+    final item = _BListItem(blocks: t.itemBlocks.map((b) => _BLeaf(b)));
+    _listStack.last.list.items.add(item);
+  }
+
+  void _closeAllLists() {
+    _listStack.clear();
+  }
+
+  List<_BNode> _currentListItemBlocks() {
+    final list = _listStack.last.list;
+    if (list.items.isEmpty) {
+      list.items.add(_BListItem());
+    }
+    return list.items.last.blocks;
+  }
+}
+
+enum _VMergeType { none, restart, continueCell }
+
+class _HtmlTableCellInfo {
+  _HtmlTableCellInfo({
+    required this.tc,
+    required this.rowIndex,
+    required this.cellIndex,
+    required this.colIndex,
+    required this.colSpan,
+    required this.vMerge,
+  });
+
+  final XmlElement tc;
+  final int rowIndex;
+  final int cellIndex;
+  final int colIndex;
+  final int colSpan;
+  final _VMergeType vMerge;
+}
+
+// ... (keep _NumberingModel, _LevelInfo, _CommentIndex, _CommentData, _FieldState)
+// Re-pasting for completeness in rewrite
+
+class _NumberingModel {
+  _NumberingModel();
+  final Map<String, String> _numIdToAbstractId = {};
+  final Map<String, Map<int, _LevelInfo>> _abstractLevels = {};
+  final Map<String, Map<int, int>> _instanceOverrides = {};
+
+  static _NumberingModel fromXml(XmlDocument? numberingXml) {
+    final m = _NumberingModel();
+    if (numberingXml == null) return m;
+
+    final abstracts = numberingXml.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'abstractNum')
+        .toList();
+    for (final abs in abstracts) {
+      final absId = abs.attributes
+          .firstWhereOrNull((a) => a.name.local == 'abstractNumId')
+          ?.value;
+      if (absId == null) continue;
+      final levelMap = <int, _LevelInfo>{};
+      final lvls = abs.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 'lvl')
+          .toList();
+      for (final lvl in lvls) {
+        final ilvlStr = lvl.attributes
+            .firstWhereOrNull((a) => a.name.local == 'ilvl')
+            ?.value;
+        final ilvl = int.tryParse(ilvlStr ?? '');
+        if (ilvl == null) continue;
+        final numFmt =
+            lvl.descendants
+                .whereType<XmlElement>()
+                .firstWhereOrNull((e) => e.name.local == 'numFmt')
+                ?.attributes
+                .firstWhereOrNull((a) => a.name.local == 'val')
+                ?.value ??
+            'bullet';
+
+        // Start override check
+        final start = lvl.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'start')
+            ?.attributes
+            .firstWhereOrNull((a) => a.name.local == 'val')
+            ?.value;
+        final startInt = int.tryParse(start ?? '');
+
+        // NOTE: Real w:lvlOverride logic would happen inside 'num' element traversal, not abstractNum.
+        // For simplicity we assume start in abstract level is default.
+        levelMap[ilvl] = _LevelInfo(numFmt: numFmt, startOverride: startInt);
+      }
+      m._abstractLevels[absId] = levelMap;
+    }
+
+    final nums = numberingXml.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'num')
+        .toList();
+    for (final num in nums) {
+      final numId = num.attributes
+          .firstWhereOrNull((a) => a.name.local == 'numId')
+          ?.value;
+      if (numId == null) continue;
+      final absId = num.descendants
+          .whereType<XmlElement>()
+          .firstWhereOrNull((e) => e.name.local == 'abstractNumId')
+          ?.attributes
+          .firstWhereOrNull((a) => a.name.local == 'val')
+          ?.value;
+      if (absId != null) m._numIdToAbstractId[numId] = absId;
+
+      final overrides = num.descendants.whereType<XmlElement>().where(
+        (e) => e.name.local == 'lvlOverride',
+      );
+      for (final ov in overrides) {
+        final ilvlStr = ov.attributes
+            .firstWhereOrNull((a) => a.name.local == 'ilvl')
+            ?.value;
+        final ilvl = int.tryParse(ilvlStr ?? '');
+        if (ilvl == null) continue;
+
+        final startOverride = ov.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'startOverride')
+            ?.attributes
+            .firstWhereOrNull((a) => a.name.local == 'val')
+            ?.value;
+        final startInt = int.tryParse(startOverride ?? '');
+        if (startInt == null) continue;
+
+        (m._instanceOverrides[numId] ??= <int, int>{})[ilvl] = startInt;
+      }
+    }
+    return m;
+  }
+
+  _LevelInfo? levelInfo({required String numId, required int ilvl}) {
+    final absId = _numIdToAbstractId[numId];
+    if (absId == null) return null;
+    final info = _abstractLevels[absId]?[ilvl];
+    if (info == null) return null;
+    final override = _instanceOverrides[numId]?[ilvl];
+    if (override == null) return info;
+    return _LevelInfo(numFmt: info.numFmt, startOverride: override);
+  }
+}
+
+class _LevelInfo {
+  _LevelInfo({required this.numFmt, this.startOverride});
+  final String numFmt;
+  final int? startOverride;
+
+  bool get ordered {
+    final f = numFmt.toLowerCase();
+    if (f == 'decimal') return true;
+    if (f.contains('roman')) return true;
+    if (f.contains('letter')) return true;
+    if (f == 'upperletter' || f == 'lowerletter') return true;
+    if (f == 'upperroman' || f == 'lowerroman') return true;
+    return false;
+  }
+}
+
+class _CommentIndex {
+  _CommentIndex(this._byId);
+  final Map<String, _CommentData> _byId;
+  static _CommentIndex fromXml(XmlDocument? commentsXml) {
+    if (commentsXml == null) return _CommentIndex(const {});
+    final map = <String, _CommentData>{};
+    final comments = commentsXml.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'comment')
+        .toList();
+    for (final c in comments) {
+      final id = c.attributes
+          .firstWhereOrNull((a) => a.name.local == 'id')
+          ?.value;
+      if (id == null) continue;
+      final author =
+          c.attributes
+              .firstWhereOrNull((a) => a.name.local == 'author')
+              ?.value ??
+          'Unknown';
+      final text = c.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 't')
+          .map((e) => e.innerText)
+          .join();
+      map[id] = _CommentData(author: author, text: text.trim());
+    }
+    return _CommentIndex(map);
+  }
+
+  _CommentData? byId(String id) => _byId[id];
+}
+
+class _CommentData {
+  _CommentData({required this.author, required this.text});
+  final String author;
+  final String text;
+}
+
+// ---------------------------------------------------------------------------
+// Shared hyperlink instruction parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Pre-compiled regexes for hyperlink field parsing (avoid recompiling in hot paths)
+final _hyperlinkQuotedRe = RegExp(
+  r'HYPERLINK\s+"([^"]+)"',
+  caseSensitive: false,
+);
+final _hyperlinkUnquotedRe = RegExp(
+  r'HYPERLINK\s+([^\s]+)',
+  caseSensitive: false,
+);
+final _hyperlinkAnchorRe = RegExp(
+  r'HYPERLINK\s+\\l\s+"([^"]+)"',
+  caseSensitive: false,
+);
+
+/// Extracts the URL from a HYPERLINK field instruction.
+String? _extractHyperlinkUrl(String instr) {
+  final upper = instr.toUpperCase();
+  if (!upper.contains('HYPERLINK')) return null;
+  final quoted = _hyperlinkQuotedRe.firstMatch(instr);
+  if (quoted != null) return quoted.group(1);
+  final unquoted = _hyperlinkUnquotedRe.firstMatch(instr);
+  if (unquoted != null) {
+    final v = unquoted.group(1);
+    if (v != null && !v.startsWith(r'\l')) return v;
+  }
+  return null;
+}
+
+/// Extracts the anchor from a HYPERLINK \l field instruction.
+String? _extractHyperlinkAnchor(String instr) {
+  return _hyperlinkAnchorRe.firstMatch(instr)?.group(1);
+}
+
+class _FieldState {
+  final List<_FieldEntry> _stack = [];
+
+  bool get isActive => _stack.isNotEmpty;
+  bool get inResult => isActive && _stack.last.inResult;
+  bool get sawEnd => isActive && _stack.last.sawEnd;
+
+  List<Inline> get displayInlines => _stack.last.displayInlines;
+
+  void begin({required String loc}) {
+    _stack.add(_FieldEntry());
+  }
+
+  void separate({required String loc}) {
+    if (!isActive) return;
+    _stack.last.inResult = true;
+  }
+
+  void end({required String loc}) {
+    if (!isActive) return;
+    _stack.last.sawEnd = true;
+  }
+
+  void appendInstr(String t) {
+    if (!isActive || inResult) return;
+    _stack.last.instr.write(t);
+  }
+
+  _FieldResult? finalizeTop({required String loc}) {
+    if (!isActive) return null;
+    final entry = _stack.removeLast();
+    final s = entry.instr.toString();
+    final url = _extractHyperlinkUrl(s);
+    final anchor = _extractHyperlinkAnchor(s);
+
+    Inline? produced;
+    if (url != null) {
+      final children = entry.displayInlines.isEmpty
+          ? [TextInline(url)]
+          : entry.displayInlines;
+      produced = LinkInline(url: url, children: children);
+    } else if (anchor != null) {
+      final children = entry.displayInlines.isEmpty
+          ? [TextInline(anchor)]
+          : entry.displayInlines;
+      produced = LinkInline(url: '#$anchor', children: children);
+    }
+
+    return _FieldResult(
+      produced: produced,
+      displayInlines: entry.displayInlines,
+    );
+  }
+}
+
+class _FieldEntry {
+  final StringBuffer instr = StringBuffer();
+  final List<Inline> displayInlines = [];
+  bool inResult = false;
+  bool sawEnd = false;
+}
+
+class _FieldResult {
+  _FieldResult({required this.produced, required this.displayInlines});
+  final Inline? produced;
+  final List<Inline> displayInlines;
+}
+
+// ============================================================================
+// NEW: Native OMML to LaTeX Engine
+// ============================================================================
+
+class _OmmlToLatex {
+  static String convert(XmlElement root) {
+    final sb = StringBuffer();
+    _walk(root, sb);
+    return sb.toString();
+  }
+
+  static void _walk(XmlNode n, StringBuffer sb) {
+    if (n is! XmlElement) {
+      if (n is XmlText) sb.write(n.value);
+      return;
+    }
+    switch (n.name.local) {
+      case 't':
+        sb.write(n.innerText);
+        break;
+      case 'f':
+        sb.write(r'\frac{');
+        _child(n, 'num', sb);
+        sb.write(r'}{');
+        _child(n, 'den', sb);
+        sb.write(r'}');
+        break;
+      case 'sup':
+        sb.write(r'^{');
+        _child(n, 'sup', sb);
+        sb.write(r'}');
+        break;
+      case 'sub':
+        sb.write(r'_{');
+        _child(n, 'sub', sb);
+        sb.write(r'}');
+        break;
+      case 'rad':
+        sb.write(r'\sqrt{');
+        _child(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      default:
+        for (final c in n.children) {
+          _walk(c, sb);
+        }
+    }
+  }
+
+  static void _child(XmlElement p, String n, StringBuffer sb) {
+    final c = p.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == n,
+    );
+    if (c != null) {
+      _walk(c, sb);
+    }
+  }
+}
