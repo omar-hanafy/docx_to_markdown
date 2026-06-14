@@ -18,4 +18,9 @@ void main() {
       expect(config.extractImages, isFalse);
     });
   });
+
+  test('top-level library exports concrete IR nodes for hooks', () {
+    final table = TableBlock(grid: TableGrid(rows: const []));
+    expect(table, isA<Block>());
+  });
 }

@@ -185,10 +185,9 @@ class DocxRelationships {
 /// - Correct relationship resolution per OPC rules.
 /// - Lazy, cached XML parsing for efficiency.
 class DocxPackage {
-  DocxPackage._({required Archive archive, InputFileStream? inputStream})
-    : _archive = archive,
-      _inputStream = inputStream {
+  DocxPackage._({required this._archive, this._inputStream}) {
     _indexArchiveFiles();
+    _validatePackageShape();
   }
 
   final Archive _archive;
@@ -235,8 +234,7 @@ class DocxPackage {
 
     if (!streaming) {
       final bytes = await file.readAsBytes();
-      final archive = ZipDecoder().decodeBytes(bytes);
-      return DocxPackage._(archive: archive);
+      return openBytes(bytes);
     }
 
     // Streaming mode
@@ -244,17 +242,29 @@ class DocxPackage {
     try {
       final archive = ZipDecoder().decodeStream(input);
       return DocxPackage._(archive: archive, inputStream: input);
+    } on DocxPackageException {
+      await input.close();
+      rethrow;
     } catch (e) {
       // Ensure we don't leak file handles on failure
       await input.close();
-      rethrow;
+      throw DocxPackageException(
+        'Invalid DOCX/ZIP package: $e',
+        part: filePath,
+      );
     }
   }
 
   /// Open a .docx from bytes (in-memory).
   static DocxPackage openBytes(Uint8List bytes) {
-    final archive = ZipDecoder().decodeBytes(bytes);
-    return DocxPackage._(archive: archive);
+    try {
+      final archive = ZipDecoder().decodeBytes(bytes);
+      return DocxPackage._(archive: archive);
+    } on DocxPackageException {
+      rethrow;
+    } catch (e) {
+      throw DocxPackageException('Invalid DOCX/ZIP package: $e');
+    }
   }
 
   /// Close any underlying file handles and free cached memory.
@@ -653,6 +663,15 @@ class DocxPackage {
       // Canonicalize path to avoid lookup bugs on Windows or odd zip writers.
       final key = _canonicalPartPath(f.name);
       _filesByCanonicalName[key] = f;
+    }
+  }
+
+  void _validatePackageShape() {
+    if (!_filesByCanonicalName.containsKey('[Content_Types].xml')) {
+      throw DocxPackageException(
+        'Invalid DOCX package: missing [Content_Types].xml',
+        part: '[Content_Types].xml',
+      );
     }
   }
 

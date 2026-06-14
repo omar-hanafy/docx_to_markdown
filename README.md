@@ -106,7 +106,7 @@ final config = DocxToMarkdownConfig(hooks: hooks);
 | Headings 1-6 | `# Heading`              | Mapped from style outline levels or names.        |
 | Lists        | `- Item` / `1. Item`     | Handles deep nesting and mixed types.             |
 | Tables       | `\| Col \|` or `<table>` | Simple tables use pipes; complex ones use HTML.   |
-| Images       | `![alt](src)`            | Can extract files or use Data URIs (custom impl). |
+| Images       | `![alt](src)`            | Can extract files and rewrite paths via hooks.    |
 | Links        | `[text](url)`            | Supports web links and internal bookmarks.        |
 | Bold/Italic  | `**bold**`, `*italic*`   | Standard syntax.                                  |
 | Code         | `` `code` ``             | Detected by font (e.g., Consolas) or style name.  |

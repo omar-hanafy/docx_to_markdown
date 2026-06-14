@@ -50,7 +50,7 @@ import 'package:docx_to_markdown/src/parser.dart';
 import 'package:docx_to_markdown/src/styles.dart';
 
 export 'src/config.dart';
-export 'src/ir.dart' show Document, Block, Inline, DocWarning, SourceLocation;
+export 'src/ir.dart';
 export 'src/ooxml_package.dart' show DocxPackageException;
 
 /// Parses DOCX bytes and renders Markdown output.
@@ -167,14 +167,9 @@ class DocxConverter {
         mediaMap: mediaMap,
         onWarning: (w) {
           if (config.hooks.onWarning != null) {
-            // Construct a best-effort HookContext or simple context
-            // Parser warns with DocWarning which has location.
-            // We don't have full context here easily without plumbing.
-            // But the hook expects (warning, ctx).
-            // We can synthesize a context from warning.location.
             config.hooks.onWarning!(
               w,
-              HookContext(location: w.location.toString()),
+              HookContext(part: w.location.part, path: w.location.path),
             );
           }
         },

@@ -128,6 +128,14 @@ void main() {
       expect(pkg.readPartBytes('word/missing.xml'), isNull);
     });
 
+    test('openBytes wraps corrupt zip errors', () {
+      final bytes = Uint8List.fromList([0x50, 0x4B, 0x03, 0x04, 0x00]);
+      expect(
+        () => DocxPackage.openBytes(bytes),
+        throwsA(isA<DocxPackageException>()),
+      );
+    });
+
     test('openFile supports streaming', () async {
       final bytes = buildDocxBytes(
         documentXml: docXmlWithBody(wP(text: 'Hello')),
