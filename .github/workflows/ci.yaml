@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  analyze:
+    name: Format & analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Cache pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-stable-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: pub-${{ runner.os }}-stable-
+      - run: dart pub get
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+  test:
+    name: Test (Dart ${{ matrix.sdk }})
+    needs: analyze
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `stable` plus the declared minimum SDK from `environment:` in pubspec.
+        sdk: [stable, "3.12.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+      - name: Cache pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ matrix.sdk }}-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: pub-${{ runner.os }}-${{ matrix.sdk }}-
+      - run: dart pub get
+      - run: dart test
+
+  coverage:
+    name: Coverage
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: Collect coverage
+        run: dart test --coverage=coverage
+      - name: Format LCOV
+        run: >-
+          dart run coverage:format_coverage --lcov --in=coverage
+          --out=coverage/lcov.info
+          --packages=.dart_tool/package_config.json --report-on=lib
+      # Public repos need no token. Delete this step for a token-free setup.
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false

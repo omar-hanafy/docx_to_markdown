@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 
 import 'package:docx_to_markdown/docx_to_markdown.dart';
-import 'package:docx_to_markdown/src/ir.dart';
 import 'package:docx_to_markdown/src/ooxml_package.dart';
 import 'package:docx_to_markdown/src/parser.dart';
 import 'package:docx_to_markdown/src/styles.dart';
@@ -44,6 +43,13 @@ void main() {
 
     test('invalid signature throws DocxPackageException', () async {
       final converter = DocxConverter(Uint8List.fromList([0x00, 0x01, 0x02]));
+      expect(converter.convert(), throwsA(isA<DocxPackageException>()));
+    });
+
+    test('corrupt zip throws DocxPackageException', () async {
+      final converter = DocxConverter(
+        Uint8List.fromList([0x50, 0x4B, 0x03, 0x04, 0x00]),
+      );
       expect(converter.convert(), throwsA(isA<DocxPackageException>()));
     });
   });
@@ -229,6 +235,133 @@ void main() {
       expect(markdown.trim(), '3. A');
     });
 
+    test('groups consecutive same-numId items into one list', () async {
+      // Regression: the abstract w:start must not split a continuing list.
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Foo'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Bar'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Baz'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(numId: '1', numFmt: 'decimal', start: 1),
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.length, 1);
+      final list = doc.blocks.first as ListBlock;
+      expect(list.items.length, 3);
+    });
+
+    test('a non-list paragraph splits adjacent same-numId lists', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(text: 'Interruption'),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(numId: '1', numFmt: 'decimal', start: 1),
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.length, 3);
+      expect(doc.blocks.whereType<ListBlock>().length, 2);
+    });
+
+    test('different numIds stay separate lists', () async {
+      const twoNums = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '2',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: twoNums,
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.whereType<ListBlock>().length, 2);
+    });
+
+    test('instance startOverride wins over abstract start', () async {
+      final body = wP(
+        numId: '1',
+        ilvl: 0,
+        innerXml: wR(text: 'A'),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'decimal',
+          start: 5,
+          startOverride: 3,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), '3. A');
+    });
+
+    test('abstract start is used when there is no override', () async {
+      final body = wP(
+        numId: '1',
+        ilvl: 0,
+        innerXml: wR(text: 'A'),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(numId: '1', numFmt: 'decimal', start: 5),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), '5. A');
+    });
+
     test('parses hyperlinks via relationships', () async {
       final body = wP(
         innerXml: wHyperlink(
@@ -269,6 +402,114 @@ void main() {
       );
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '![Image](image1.png)');
+    });
+
+    test('reads image title from docPr', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(
+            embedId: 'rId2',
+            descr: 'AltText',
+            title: 'My Title',
+          ),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '![Image](image1.png "My Title")');
+    });
+
+    test('parses w:highlight and renders as mark when enabled', () async {
+      final body = wP(
+        innerXml: wR(text: 'x', rPrXml: '<w:highlight w:val="yellow"/>'),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(highlightMode: HighlightMode.mark),
+      ).convert();
+      expect(markdown.trim(), '<mark>x</mark>');
+    });
+
+    test('drops highlight by default', () async {
+      final body = wP(
+        innerXml: wR(text: 'x', rPrXml: '<w:highlight w:val="yellow"/>'),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'x');
+    });
+
+    test('parses w:color and renders as span when enabled', () async {
+      final body = wP(
+        innerXml: wR(text: 'x', rPrXml: '<w:color w:val="FF0000"/>'),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(textColorMode: TextColorMode.htmlSpan),
+      ).convert();
+      expect(markdown.trim(), '<span style="color:#FF0000">x</span>');
+    });
+
+    test('shaded run takes code precedence over highlight', () async {
+      final body = wP(
+        innerXml: wR(
+          text: 'x',
+          rPrXml:
+              '<w:highlight w:val="yellow"/>'
+              '<w:shd w:val="clear" w:fill="DDDDDD"/>',
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          highlightMode: HighlightMode.mark,
+          treatShadedRunsAsCode: true,
+        ),
+      ).convert();
+      expect(markdown.trim(), '`x`');
+    });
+
+    test(
+      'page-break-only paragraph becomes a page break when enabled',
+      () async {
+        final body = [
+          wP(text: 'before'),
+          wP(innerXml: '<w:r><w:br w:type="page"/></w:r>'),
+          wP(text: 'after'),
+        ].join();
+        final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(
+            pageBreakMode: PageBreakMode.thematicBreak,
+          ),
+        ).convert();
+        expect(markdown.trim(), 'before\n\n---\n\nafter');
+      },
+    );
+
+    test('page breaks are ignored by default', () async {
+      final body = [
+        wP(text: 'before'),
+        wP(innerXml: '<w:r><w:br w:type="page"/></w:r>'),
+        wP(text: 'after'),
+      ].join();
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, isNot(contains('---')));
+      expect(markdown.trim(), 'before\n\nafter');
     });
 
     test('drawing with missing rel falls back to text', () async {
@@ -352,6 +593,66 @@ void main() {
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '[Link](https://example.com)');
+    });
+
+    test('parses REF cross-reference field as anchor link', () async {
+      final body = wP(
+        innerXml: [
+          '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+          '<w:r><w:instrText xml:space="preserve">REF _Ref12345 \\h</w:instrText></w:r>',
+          '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+          '<w:r><w:t>See section</w:t></w:r>',
+          '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+        ].join(),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '[See section](#_Ref12345)');
+    });
+
+    test('parses fldSimple REF as anchor link', () async {
+      final body = wP(
+        innerXml: wFldSimple(
+          instr: 'REF _Ref99 \\h',
+          innerXml: wR(text: 'X'),
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '[X](#_Ref99)');
+    });
+
+    test('parses fldSimple PAGEREF as anchor link', () async {
+      final body = wP(
+        innerXml: wFldSimple(
+          instr: 'PAGEREF _Ref77 \\h',
+          innerXml: wR(text: '7'),
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '[7](#_Ref77)');
+    });
+
+    test('PAGE field falls back to display text', () async {
+      final body = wP(
+        innerXml: wFldSimple(
+          instr: 'PAGE',
+          innerXml: wR(text: '7'),
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '7');
+    });
+
+    test('navigable underscore bookmark emits anchor', () async {
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref12345"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains('<a id="_Ref12345"></a>'), isTrue);
     });
 
     test('renders footnotes when enabled', () async {
@@ -556,6 +857,118 @@ void main() {
       expect(markdown.trim(), '1. A\n2. B');
     });
 
+    test('ordered list preserves source number format in the IR', () async {
+      final body = wP(
+        numId: '1',
+        ilvl: 0,
+        innerXml: wR(text: 'A'),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'upperRoman',
+          start: null,
+        ),
+      );
+      final doc = await parseDocument(bytes);
+      final list = doc.blocks.first as ListBlock;
+      expect(list.numberFormat, ListNumberFormat.upperRoman);
+    });
+
+    test('preserveFormat renders upper roman markers with wide gap', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'upperRoman',
+          start: null,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListMarker: OrderedListMarker.preserveFormat,
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      // 'I.' is a single capital marker -> two spaces; 'II.' -> one space.
+      expect(markdown.trim(), 'I.  A\nII. B');
+    });
+
+    test('preserveFormat renders lower alpha markers', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'lowerLetter',
+          start: null,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListMarker: OrderedListMarker.preserveFormat,
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), 'a. A\nb. B');
+    });
+
+    test('default marker stays decimal for an upper roman source', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'upperRoman',
+          start: null,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), '1. A\n2. B');
+    });
+
     test('tableMode htmlOnly renders HTML even for simple tables', () async {
       final table = '''<w:tbl>
   <w:tr>
@@ -684,6 +1097,51 @@ void main() {
       );
     });
 
+    test('showDeletionsAsStrikethrough renders deleted text struck', () async {
+      final body =
+          '<w:p><w:del><w:r><w:delText>Removed</w:delText></w:r></w:del></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          trackChangesMode: TrackChangesMode.showDeletionsAsStrikethrough,
+        ),
+      ).convert();
+      expect(markdown.trim(), '~~Removed~~');
+    });
+
+    test('rejectChanges restores deleted text as plain text', () async {
+      final body =
+          '<w:p><w:del><w:r><w:delText>Removed</w:delText></w:r></w:del></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          trackChangesMode: TrackChangesMode.rejectChanges,
+        ),
+      ).convert();
+      expect(markdown.trim(), 'Removed');
+    });
+
+    test('rejectChanges drops inserted text', () async {
+      final body = '<w:p><w:ins><w:r><w:t>Added</w:t></w:r></w:ins></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          trackChangesMode: TrackChangesMode.rejectChanges,
+        ),
+      ).convert();
+      expect(markdown.trim(), '');
+    });
+
+    test('acceptAll keeps inserted text', () async {
+      final body = '<w:p><w:ins><w:r><w:t>Added</w:t></w:r></w:ins></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'Added');
+    });
+
     test('preserveEmptyParagraphs keeps empty paragraph', () async {
       final body = wP(innerXml: '');
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
@@ -713,6 +1171,26 @@ void main() {
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '<sup>***~~<u>Text</u>~~***</sup>');
+    });
+
+    test('run formatting respects off values', () async {
+      final run = wR(
+        innerXml: wT('Text'),
+        rPrXml:
+            '<w:b w:val="0"/><w:i w:val="false"/><w:u w:val="none"/><w:strike w:val="off"/>',
+      );
+      final body = wP(innerXml: run);
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'Text');
+    });
+
+    test('complex script bold and italic are treated as formatting', () async {
+      final run = wR(innerXml: wT('Text'), rPrXml: '<w:bCs/><w:iCs/>');
+      final body = wP(innerXml: run);
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '***Text***');
     });
 
     test('horizontal rule detected by --- text', () async {
@@ -748,7 +1226,74 @@ void main() {
       expect(markdown.contains('\$x\$'), isTrue);
     });
 
+    test('inline math renders OMML superscript fallback', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:sSup>'
+          '<m:e><m:r><m:t>x</m:t></m:r></m:e>'
+          '<m:sup><m:r><m:t>2</m:t></m:r></m:sup>'
+          '</m:sSup>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'$x^{2}$'), isTrue);
+    });
+
+    test('inline math renders n-ary summation with limits', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:nary>'
+          '<m:naryPr><m:chr m:val="∑"/></m:naryPr>'
+          '<m:sub><m:r><m:t>i=0</m:t></m:r></m:sub>'
+          '<m:sup><m:r><m:t>n</m:t></m:r></m:sup>'
+          '<m:e><m:r><m:t>x</m:t></m:r></m:e>'
+          '</m:nary>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'$\sum_{i=0}^{n}{x}$'), isTrue);
+    });
+
+    test('inline math renders delimiters', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:d><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'\left( x \right)'), isTrue);
+    });
+
+    test('inline math renders matrices', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:m>'
+          '<m:mr><m:e><m:r><m:t>a</m:t></m:r></m:e>'
+          '<m:e><m:r><m:t>b</m:t></m:r></m:e></m:mr>'
+          '<m:mr><m:e><m:r><m:t>c</m:t></m:r></m:e>'
+          '<m:e><m:r><m:t>d</m:t></m:r></m:e></m:mr>'
+          '</m:m>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(
+        markdown.contains(r'\begin{matrix}a & b \\ c & d\end{matrix}'),
+        isTrue,
+      );
+    });
+
+    test('inline math renders accents with default hat', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:acc><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'\hat{x}'), isTrue);
+    });
+
     test('ommlToLatex hook overrides math conversion', () async {
+      HookContext? seenContext;
       final body =
           '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
           '<m:t>x</m:t></m:oMath>';
@@ -756,11 +1301,18 @@ void main() {
       final markdown = await DocxConverter(
         bytes,
         config: DocxToMarkdownConfig(
-          hooks: DocxToMarkdownHooks(ommlToLatex: (xml, [ctx]) => 'Y'),
+          hooks: DocxToMarkdownHooks(
+            ommlToLatex: (xml, [ctx]) {
+              seenContext = ctx;
+              return 'Y';
+            },
+          ),
         ),
       ).convert();
       expect(markdown.contains('\$\$'), isTrue);
       expect(markdown.contains('Y'), isTrue);
+      expect(seenContext?.part, 'word/document.xml');
+      expect(seenContext?.path, contains('document.xml:body'));
     });
 
     test('includes headers and footers when enabled', () async {

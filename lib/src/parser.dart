@@ -229,7 +229,12 @@ class DocxParser {
 
       case 'oMath':
       case 'oMathPara':
-        return [_BlockToken(_parseMathBlock(el, loc: loc), loc: loc)];
+        return [
+          _BlockToken(
+            _parseMathBlock(el, ctx: ctx, loc: loc),
+            loc: loc,
+          ),
+        ];
 
       case 'sectPr':
         return const [];
@@ -276,6 +281,24 @@ class DocxParser {
 
     if (_isHorizontalRuleParagraph(p, pPr: pPr)) {
       return [_BlockToken(const HorizontalRuleBlock(), loc: loc)];
+    }
+
+    // Explicit page break (w:br type="page"). Only a paragraph whose sole
+    // content is the break becomes a PageBreakBlock; a break embedded in a
+    // paragraph with other content is kept as a line break (mid-paragraph
+    // splitting is deferred) and reported. w:lastRenderedPageBreak (a layout
+    // hint) is always ignored.
+    if (config.pageBreakMode != PageBreakMode.ignore && _hasPageBreak(p)) {
+      if (_isPageBreakOnlyParagraph(p)) {
+        return [_BlockToken(const PageBreakBlock(), loc: loc)];
+      }
+      _warn(
+        code: 'page.break.midparagraph',
+        message:
+            'Page break inside a paragraph with content; kept as a line break. '
+            'Mid-paragraph page-break splitting is not yet supported.',
+        location: loc,
+      );
     }
 
     final analysis = styles.analyzeParagraphStyle(styleId);
@@ -329,7 +352,11 @@ class DocxParser {
         ilvl: effectiveIlvl,
       );
       final ordered = levelInfo?.ordered ?? false;
-      final startOverride = levelInfo?.startOverride; // Fix list restarts
+      // Resolved starting number: an instance lvlOverride/startOverride wins,
+      // otherwise the abstract level's w:start. This only sets where the list
+      // begins - it must not trigger a per-item restart (see _addListItem).
+      final start = levelInfo?.startOverride ?? levelInfo?.start;
+      final numberFormat = levelInfo?.numberFormat ?? ListNumberFormat.decimal;
 
       final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
 
@@ -339,7 +366,8 @@ class DocxParser {
           ordered: ordered,
           level: math.max(effectiveIlvl, 0),
           numId: effectiveNumId,
-          startOverride: startOverride,
+          start: start,
+          numberFormat: numberFormat,
           loc: loc,
           itemBlocks: [ParagraphBlock(inlines)],
         ),
@@ -475,10 +503,16 @@ class DocxParser {
       // Inline Containers (Recursively Unwrap)
       case 'smartTag':
       case 'customXml':
-      case 'ins':
       case 'bdo':
       case 'dir':
         recurse(child, cLoc);
+        break;
+
+      case 'ins':
+        // Tracked insertion: keep inline unless revisions are rejected.
+        if (config.trackChangesMode != TrackChangesMode.rejectChanges) {
+          recurse(child, cLoc);
+        }
         break;
 
       case 'sdt':
@@ -500,7 +534,7 @@ class DocxParser {
 
       case 'oMath':
         if (field.isActive) _finalizeField(out, field, cLoc);
-        push(_parseMathInline(child, loc: cLoc));
+        push(_parseMathInline(child, ctx: ctx, loc: cLoc));
         break;
 
       case 'commentRangeStart':
@@ -528,17 +562,31 @@ class DocxParser {
 
       case 'bookmarkStart':
         final name = _attrLocal(child, 'name');
-        if (name != null && !name.startsWith('_')) {
+        if (name != null && _isNavigableBookmark(name)) {
           push(HtmlInline('<a id="$name"></a>'));
         }
         break;
 
       case 'del':
-        _warn(
-          code: 'trackChanges.deletionDropped',
-          message: 'Dropped deleted text (w:del).',
-          location: cLoc,
-        );
+        switch (config.trackChangesMode) {
+          case TrackChangesMode.acceptAll:
+            _warn(
+              code: 'trackChanges.deletionDropped',
+              message: 'Dropped deleted text (w:del).',
+              location: cLoc,
+            );
+            break;
+          case TrackChangesMode.rejectChanges:
+            final restored = _delText(child);
+            if (restored.isNotEmpty) push(TextInline(restored));
+            break;
+          case TrackChangesMode.showDeletionsAsStrikethrough:
+            final removed = _delText(child);
+            if (removed.isNotEmpty) {
+              push(StrikeInline([TextInline(removed)]));
+            }
+            break;
+        }
         break;
 
       default:
@@ -702,10 +750,10 @@ class DocxParser {
       return HtmlInline(_inlineToPlainText(base));
     }
 
-    final bold = _isOnOff(rPr, 'b');
-    final italic = _isOnOff(rPr, 'i');
-    final strike = _firstChildByLocal(rPr, 'strike') != null;
-    final underline = _firstChildByLocal(rPr, 'u') != null;
+    final bold = _isAnyOnOff(rPr, const ['b', 'bCs']);
+    final italic = _isAnyOnOff(rPr, const ['i', 'iCs']);
+    final strike = _isAnyOnOff(rPr, const ['strike', 'dstrike']);
+    final underline = _isOnOff(rPr, 'u');
 
     final vertAlign = _attrLocal(_firstChildByLocal(rPr, 'vertAlign'), 'val');
 
@@ -719,6 +767,22 @@ class DocxParser {
     if (vertAlign == 'subscript') node = SubInline([node]);
     if (vertAlign == 'superscript') node = SupInline([node]);
 
+    // Highlight (w:highlight) and text color (w:color) wrap the formatted run.
+    // They are always parsed into the IR for fidelity; the renderer drops them
+    // when the corresponding mode is `none` (mirroring UnderlineMode.ignore).
+    // Shaded runs are intercepted earlier by the _isCodeRun early return, so
+    // there is no conflict with w:shd here.
+    final color = _attrLocal(_firstChildByLocal(rPr, 'color'), 'val');
+    if (color != null && color.isNotEmpty && color.toLowerCase() != 'auto') {
+      node = ColorInline([node], color: color);
+    }
+    final highlight = _attrLocal(_firstChildByLocal(rPr, 'highlight'), 'val');
+    if (highlight != null &&
+        highlight.isNotEmpty &&
+        highlight.toLowerCase() != 'none') {
+      node = HighlightInline([node], color: highlight);
+    }
+
     return node;
   }
 
@@ -726,7 +790,16 @@ class DocxParser {
     final el = _firstChildByLocal(rPr, childLocalName);
     if (el == null) return false;
     final v = _attrLocal(el, 'val');
-    return v == null || v.toLowerCase() != 'false' && v != '0';
+    if (v == null) return true;
+    final normalized = v.trim().toLowerCase();
+    return normalized != 'false' &&
+        normalized != '0' &&
+        normalized != 'off' &&
+        normalized != 'none';
+  }
+
+  bool _isAnyOnOff(XmlElement rPr, Iterable<String> childLocalNames) {
+    return childLocalNames.any((name) => _isOnOff(rPr, name));
   }
 
   bool _isCodeRun(XmlElement rPr) {
@@ -757,6 +830,18 @@ class DocxParser {
       if (f == h || f.contains(h)) return true;
     }
     return false;
+  }
+
+  /// Whether a bookmark name is a navigable cross-reference target.
+  ///
+  /// Word emits internal scaffolding bookmarks prefixed with `_`, but its
+  /// cross-reference (`_Ref`), table-of-contents (`_Toc`), and hyperlink
+  /// (`_Hlk`) anchors are real navigation targets that REF/PAGEREF link to.
+  bool _isNavigableBookmark(String name) {
+    if (!name.startsWith('_')) return true;
+    return name.startsWith('_Ref') ||
+        name.startsWith('_Toc') ||
+        name.startsWith('_Hlk');
   }
 
   List<Inline> _parseHyperlink(
@@ -797,6 +882,7 @@ class DocxParser {
 
     final url = _extractHyperlinkUrl(instr);
     final anchor = _extractHyperlinkAnchor(instr);
+    final ref = _extractRefBookmark(instr);
 
     // Recursively parse children
     final children = _parseInlineChildren(fldSimple, ctx: ctx, loc: loc);
@@ -812,6 +898,11 @@ class DocxParser {
           LinkInline(url: '#$anchor', children: [TextInline(anchor)]),
         ];
       }
+      if (ref != null) {
+        return [
+          LinkInline(url: '#$ref', children: [TextInline(ref)]),
+        ];
+      }
       return const [];
     }
 
@@ -820,6 +911,9 @@ class DocxParser {
     }
     if (anchor != null) {
       return [LinkInline(url: '#$anchor', children: children)];
+    }
+    if (ref != null) {
+      return [LinkInline(url: '#$ref', children: children)];
     }
 
     return children;
@@ -847,7 +941,19 @@ class DocxParser {
                 ?.value ??
             'Image';
 
-        return [ImageInline(src: src, alt: alt)];
+        // `wp:docPr/@title` is Word's "Alt Text" title field. ImageInline renders
+        // it as a Markdown link title: `![alt](src "title")`.
+        final rawTitle = drawing.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'docPr')
+            ?.attributes
+            .firstWhereOrNull((a) => a.name.local == 'title')
+            ?.value;
+        final title = (rawTitle != null && rawTitle.isNotEmpty)
+            ? rawTitle
+            : null;
+
+        return [ImageInline(src: src, alt: alt, title: title)];
       }
     }
 
@@ -904,8 +1010,11 @@ class DocxParser {
     final src = _resolveMediaTarget(rid, ctx: ctx);
     if (src == null) return null;
 
+    // Legacy VML stores an optional title on `v:imagedata/@o:title`.
+    final rawTitle = _attrLocal(imgData, 'title');
+    final title = (rawTitle != null && rawTitle.isNotEmpty) ? rawTitle : null;
     final alt = 'Image';
-    return ImageInline(src: src, alt: alt);
+    return ImageInline(src: src, alt: alt, title: title);
   }
 
   // ===========================================================================
@@ -1175,16 +1284,30 @@ class DocxParser {
   // Math
   // ===========================================================================
 
-  Block _parseMathBlock(XmlElement math, {required String loc}) {
+  Block _parseMathBlock(
+    XmlElement math, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
     final latex =
-        config.hooks.ommlToLatex?.call(math.toXmlString()) ??
+        config.hooks.ommlToLatex?.call(
+          math.toXmlString(),
+          HookContext(part: ctx.partPath, path: loc),
+        ) ??
         _OmmlToLatex.convert(math);
     return MathBlock(latex);
   }
 
-  Inline _parseMathInline(XmlElement math, {required String loc}) {
+  Inline _parseMathInline(
+    XmlElement math, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
     final latex =
-        config.hooks.ommlToLatex?.call(math.toXmlString()) ??
+        config.hooks.ommlToLatex?.call(
+          math.toXmlString(),
+          HookContext(part: ctx.partPath, path: loc),
+        ) ??
         _OmmlToLatex.convert(math);
     return HtmlInline('\$$latex\$');
   }
@@ -1379,6 +1502,14 @@ class DocxParser {
     return sb.toString();
   }
 
+  /// Extracts the text of a `w:del` deletion. Word stores deleted runs in
+  /// `w:delText`; we also accept `w:t` for lenient inputs.
+  String _delText(XmlElement del) => del.descendants
+      .whereType<XmlElement>()
+      .where((e) => e.name.local == 'delText' || e.name.local == 't')
+      .map((e) => e.innerText)
+      .join();
+
   bool _isInlineListEffectivelyEmpty(List<Inline> inlines) {
     if (inlines.isEmpty) return true;
     final txt = _inlineListToPlainText(inlines).trim();
@@ -1407,6 +1538,25 @@ class DocxParser {
         .trim();
     if (txt == '---' || txt == '***') return true;
     return false;
+  }
+
+  bool _hasPageBreak(XmlElement p) => p.descendants.whereType<XmlElement>().any(
+    (e) => e.name.local == 'br' && _attrLocal(e, 'type') == 'page',
+  );
+
+  /// True when the only meaningful content of [p] is page break(s): no
+  /// non-whitespace text and no embedded drawings or objects.
+  bool _isPageBreakOnlyParagraph(XmlElement p) {
+    final hasText = p.descendants.whereType<XmlElement>().any(
+      (e) => e.name.local == 't' && e.innerText.trim().isNotEmpty,
+    );
+    if (hasText) return false;
+    return !p.descendants.whereType<XmlElement>().any(
+      (e) =>
+          e.name.local == 'drawing' ||
+          e.name.local == 'pict' ||
+          e.name.local == 'object',
+    );
   }
 
   int? _readIndentLeftTwips(XmlElement? pPr) {
@@ -1467,6 +1617,7 @@ class DocxParser {
       ListBlock() => ListBlock(
         ordered: block.ordered,
         start: block.start,
+        numberFormat: block.numberFormat,
         tightness: block.tightness,
         items: block.items
             .mapIndexed(
@@ -1629,6 +1780,8 @@ class DocxParser {
     UnderlineInline() => _inlineListToPlainText(i.children),
     SupInline() => _inlineListToPlainText(i.children),
     SubInline() => _inlineListToPlainText(i.children),
+    HighlightInline() => _inlineListToPlainText(i.children),
+    ColorInline() => _inlineListToPlainText(i.children),
     HtmlInline() => i.html,
     _ => '',
   };
@@ -1742,7 +1895,8 @@ class _ListItemToken extends _Token {
     required this.ordered,
     required this.level,
     required this.numId,
-    this.startOverride, // New
+    this.start,
+    this.numberFormat = ListNumberFormat.decimal,
     required this.itemBlocks,
     required this.loc,
   });
@@ -1750,7 +1904,12 @@ class _ListItemToken extends _Token {
   final bool ordered;
   final int level;
   final String numId;
-  final int? startOverride;
+
+  /// The resolved starting number for this level (instance restart override if
+  /// present, else the abstract `w:start`). Sets the list's first number only;
+  /// it never forces a per-item restart.
+  final int? start;
+  final ListNumberFormat numberFormat;
   final List<Block> itemBlocks;
   final String loc;
 }
@@ -1785,10 +1944,16 @@ final class _BLeaf implements _BNode {
 }
 
 final class _BList implements _BNode {
-  _BList({required this.ordered, required this.start, required this.tightness});
+  _BList({
+    required this.ordered,
+    required this.start,
+    required this.numberFormat,
+    required this.tightness,
+  });
 
   bool ordered;
   int start;
+  ListNumberFormat numberFormat;
   ListTightness tightness;
 
   final List<_BListItem> items = [];
@@ -1798,6 +1963,7 @@ final class _BList implements _BNode {
     return ListBlock(
       ordered: ordered,
       start: start,
+      numberFormat: numberFormat,
       tightness: tightness,
       items: items.map((it) => it.toListItem()).toList(growable: false),
     );
@@ -1933,25 +2099,30 @@ class _TokenBuilder {
       _listStack.removeLast();
     }
 
-    // Check for restart (change of numId) or explicit startOverride at the same level
+    // Restart only when the numbering instance (numId) changes. A change of
+    // numId is how Word represents a genuine list restart; consecutive items
+    // sharing one numId stay a single list. (Interruptions by non-list blocks
+    // are handled separately by _closeAllLists, which clears the stack.) A
+    // start value alone must NOT split a list - that was the cause of every
+    // numbered list shattering into single-item lists.
     if (_listStack.length == level + 1) {
       final top = _listStack.last;
-      bool restart = top.numId != t.numId;
-      if (!restart && t.startOverride != null) restart = true;
-
-      if (restart) _listStack.removeLast();
+      if (top.numId != t.numId) _listStack.removeLast();
     }
 
     // Open missing list levels
     while (_listStack.length < level + 1) {
-      final ordered = (_listStack.length == level) ? t.ordered : false;
-      final start = (t.startOverride != null && _listStack.length == level)
-          ? t.startOverride!
-          : 1;
+      final atItemLevel = _listStack.length == level;
+      final ordered = atItemLevel ? t.ordered : false;
+      final start = (t.start != null && atItemLevel) ? t.start! : 1;
+      final numberFormat = atItemLevel
+          ? t.numberFormat
+          : ListNumberFormat.decimal;
 
       final listBlock = _BList(
         ordered: ordered,
         start: start,
+        numberFormat: numberFormat,
         tightness: ListTightness.auto,
       );
 
@@ -2043,7 +2214,9 @@ class _NumberingModel {
                 ?.value ??
             'bullet';
 
-        // Start override check
+        // The abstract level's starting number (w:lvl/w:start). This only sets
+        // where the list begins; it must NOT be treated as a restart signal
+        // (genuine restarts arrive as instance lvlOverride/startOverride below).
         final start = lvl.descendants
             .whereType<XmlElement>()
             .firstWhereOrNull((e) => e.name.local == 'start')
@@ -2052,9 +2225,7 @@ class _NumberingModel {
             ?.value;
         final startInt = int.tryParse(start ?? '');
 
-        // NOTE: Real w:lvlOverride logic would happen inside 'num' element traversal, not abstractNum.
-        // For simplicity we assume start in abstract level is default.
-        levelMap[ilvl] = _LevelInfo(numFmt: numFmt, startOverride: startInt);
+        levelMap[ilvl] = _LevelInfo(numFmt: numFmt, start: startInt);
       }
       m._abstractLevels[absId] = levelMap;
     }
@@ -2108,13 +2279,25 @@ class _NumberingModel {
     if (info == null) return null;
     final override = _instanceOverrides[numId]?[ilvl];
     if (override == null) return info;
-    return _LevelInfo(numFmt: info.numFmt, startOverride: override);
+    return _LevelInfo(
+      numFmt: info.numFmt,
+      start: info.start,
+      startOverride: override,
+    );
   }
 }
 
 class _LevelInfo {
-  _LevelInfo({required this.numFmt, this.startOverride});
+  _LevelInfo({required this.numFmt, this.start, this.startOverride});
   final String numFmt;
+
+  /// The abstract level's starting number (`w:lvl/w:start`). Present on most
+  /// ordered lists; it sets where the list begins and is NOT a restart signal.
+  final int? start;
+
+  /// An instance restart override (`w:num/w:lvlOverride/w:startOverride`).
+  /// Distinct from [start] so that an ordinary `w:start` is never mistaken for
+  /// a mid-list restart.
   final int? startOverride;
 
   bool get ordered {
@@ -2125,6 +2308,25 @@ class _LevelInfo {
     if (f == 'upperletter' || f == 'lowerletter') return true;
     if (f == 'upperroman' || f == 'lowerroman') return true;
     return false;
+  }
+
+  /// Maps the OOXML `w:numFmt` value to an IR [ListNumberFormat].
+  ///
+  /// Unrecognized or decimal-like formats fall back to
+  /// [ListNumberFormat.decimal].
+  ListNumberFormat get numberFormat {
+    switch (numFmt.toLowerCase()) {
+      case 'lowerletter':
+        return ListNumberFormat.lowerAlpha;
+      case 'upperletter':
+        return ListNumberFormat.upperAlpha;
+      case 'lowerroman':
+        return ListNumberFormat.lowerRoman;
+      case 'upperroman':
+        return ListNumberFormat.upperRoman;
+      default:
+        return ListNumberFormat.decimal;
+    }
   }
 }
 
@@ -2204,6 +2406,19 @@ String? _extractHyperlinkAnchor(String instr) {
   return _hyperlinkAnchorRe.firstMatch(instr)?.group(1);
 }
 
+/// Matches a REF or PAGEREF cross-reference field, capturing the bookmark name.
+///
+/// The word boundary prevents the `REF` alternative from matching inside
+/// `PAGEREF`; the character class stops before field switches like `\h`.
+final _refFieldRe = RegExp(
+  r'\b(?:REF|PAGEREF)\s+"?([^\s"\\]+)',
+  caseSensitive: false,
+);
+
+/// Extracts the target bookmark name from a REF/PAGEREF field instruction.
+String? _extractRefBookmark(String instr) =>
+    _refFieldRe.firstMatch(instr)?.group(1);
+
 class _FieldState {
   final List<_FieldEntry> _stack = [];
 
@@ -2250,6 +2465,14 @@ class _FieldState {
           ? [TextInline(anchor)]
           : entry.displayInlines;
       produced = LinkInline(url: '#$anchor', children: children);
+    } else {
+      final ref = _extractRefBookmark(s);
+      if (ref != null) {
+        final children = entry.displayInlines.isEmpty
+            ? [TextInline(ref)]
+            : entry.displayInlines;
+        produced = LinkInline(url: '#$ref', children: children);
+      }
     }
 
     return _FieldResult(
@@ -2294,24 +2517,118 @@ class _OmmlToLatex {
         break;
       case 'f':
         sb.write(r'\frac{');
-        _child(n, 'num', sb);
+        _writeChild(n, 'num', sb);
         sb.write(r'}{');
-        _child(n, 'den', sb);
+        _writeChild(n, 'den', sb);
         sb.write(r'}');
         break;
-      case 'sup':
+      case 'sSup':
+        _writeChild(n, 'e', sb);
         sb.write(r'^{');
-        _child(n, 'sup', sb);
+        _writeChild(n, 'sup', sb);
         sb.write(r'}');
         break;
-      case 'sub':
+      case 'sSub':
+        _writeChild(n, 'e', sb);
         sb.write(r'_{');
-        _child(n, 'sub', sb);
+        _writeChild(n, 'sub', sb);
+        sb.write(r'}');
+        break;
+      case 'sSubSup':
+        _writeChild(n, 'e', sb);
+        sb.write(r'_{');
+        _writeChild(n, 'sub', sb);
+        sb.write(r'}^{');
+        _writeChild(n, 'sup', sb);
         sb.write(r'}');
         break;
       case 'rad':
-        sb.write(r'\sqrt{');
-        _child(n, 'e', sb);
+        final degree = _renderChild(n, 'deg');
+        if (degree.isEmpty) {
+          sb.write(r'\sqrt{');
+        } else {
+          sb.write(r'\sqrt[');
+          sb.write(degree);
+          sb.write(r']{');
+        }
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'nary':
+        final naryPr = _childEl(n, 'naryPr');
+        sb.write(_naryOp(_attrVal(_childEl(naryPr, 'chr')) ?? '∫'));
+        if (_attrVal(_childEl(naryPr, 'subHide')) != '1') {
+          final sub = _renderChild(n, 'sub');
+          if (sub.isNotEmpty) sb.write('_{$sub}');
+        }
+        if (_attrVal(_childEl(naryPr, 'supHide')) != '1') {
+          final sup = _renderChild(n, 'sup');
+          if (sup.isNotEmpty) sb.write('^{$sup}');
+        }
+        sb.write(r'{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'd':
+        final dPr = _childEl(n, 'dPr');
+        sb.write('\\left${_delimLatex(dPr, 'begChr', '(')} ');
+        final es = _childEls(n, 'e').toList();
+        final sep = _delimLatex(dPr, 'sepChr', '|');
+        for (var i = 0; i < es.length; i++) {
+          if (i > 0) sb.write(sep);
+          _walk(es[i], sb);
+        }
+        sb.write(' \\right${_delimLatex(dPr, 'endChr', ')')}');
+        break;
+      case 'm':
+        sb.write(r'\begin{matrix}');
+        final rows = _childEls(n, 'mr').toList();
+        for (var r = 0; r < rows.length; r++) {
+          final cells = _childEls(rows[r], 'e').toList();
+          for (var c = 0; c < cells.length; c++) {
+            if (c > 0) sb.write(' & ');
+            _walk(cells[c], sb);
+          }
+          if (r < rows.length - 1) sb.write(r' \\ ');
+        }
+        sb.write(r'\end{matrix}');
+        break;
+      case 'acc':
+        sb.write(_accentCmd(_attrVal(_childEl(_childEl(n, 'accPr'), 'chr'))));
+        sb.write(r'{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'bar':
+        final barPos = _attrVal(_childEl(_childEl(n, 'barPr'), 'pos'));
+        sb.write(barPos == 'bot' ? r'\underline{' : r'\overline{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'groupChr':
+        final gPr = _childEl(n, 'groupChrPr');
+        final under =
+            (_attrVal(_childEl(gPr, 'pos')) ?? 'bot') != 'top' &&
+            _attrVal(_childEl(gPr, 'chr')) != '⏞';
+        sb.write(under ? r'\underbrace{' : r'\overbrace{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'func':
+        _writeChild(n, 'fName', sb);
+        sb.write(' ');
+        _writeChild(n, 'e', sb);
+        break;
+      case 'limLow':
+        _writeChild(n, 'e', sb);
+        sb.write(r'_{');
+        _writeChild(n, 'lim', sb);
+        sb.write(r'}');
+        break;
+      case 'limUpp':
+        _writeChild(n, 'e', sb);
+        sb.write(r'^{');
+        _writeChild(n, 'lim', sb);
         sb.write(r'}');
         break;
       default:
@@ -2321,12 +2638,126 @@ class _OmmlToLatex {
     }
   }
 
-  static void _child(XmlElement p, String n, StringBuffer sb) {
-    final c = p.children.whereType<XmlElement>().firstWhereOrNull(
-      (e) => e.name.local == n,
+  static String _renderChild(XmlElement parent, String localName) {
+    final sb = StringBuffer();
+    _writeChild(parent, localName, sb);
+    return sb.toString();
+  }
+
+  static void _writeChild(
+    XmlElement parent,
+    String localName,
+    StringBuffer sb,
+  ) {
+    final child = parent.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == localName,
     );
-    if (c != null) {
-      _walk(c, sb);
+    if (child != null) {
+      _walk(child, sb);
+    }
+  }
+
+  static XmlElement? _childEl(XmlElement? parent, String localName) {
+    if (parent == null) return null;
+    return parent.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == localName,
+    );
+  }
+
+  static Iterable<XmlElement> _childEls(XmlElement parent, String localName) {
+    return parent.children.whereType<XmlElement>().where(
+      (e) => e.name.local == localName,
+    );
+  }
+
+  static String? _attrVal(XmlElement? el, [String localName = 'val']) {
+    if (el == null) return null;
+    return el.attributes
+        .firstWhereOrNull((a) => a.name.local == localName)
+        ?.value;
+  }
+
+  /// Maps an OMML n-ary operator character to its LaTeX command.
+  static String _naryOp(String chr) {
+    switch (chr) {
+      case '∑':
+        return r'\sum';
+      case '∏':
+        return r'\prod';
+      case '∐':
+        return r'\coprod';
+      case '∫':
+        return r'\int';
+      case '∬':
+        return r'\iint';
+      case '∭':
+        return r'\iiint';
+      case '∮':
+        return r'\oint';
+      case '⋀':
+        return r'\bigwedge';
+      case '⋁':
+        return r'\bigvee';
+      case '⋂':
+        return r'\bigcap';
+      case '⋃':
+        return r'\bigcup';
+      default:
+        return r'\int';
+    }
+  }
+
+  /// Maps an OMML accent character to its LaTeX accent command.
+  static String _accentCmd(String? chr) {
+    switch (chr) {
+      case '̃': // combining tilde
+        return r'\tilde';
+      case '̄': // combining macron
+      case '̅': // combining overline
+        return r'\bar';
+      case '̇': // combining dot above
+        return r'\dot';
+      case '̈': // combining diaeresis
+        return r'\ddot';
+      case '⃗': // combining right arrow above
+        return r'\vec';
+      case '̌': // combining caron
+        return r'\check';
+      case '̆': // combining breve
+        return r'\breve';
+      default: // combining circumflex (OMML default) and unknowns
+        return r'\hat';
+    }
+  }
+
+  /// Maps an OMML delimiter character to a LaTeX-safe delimiter.
+  static String _delimLatex(XmlElement? pr, String attr, String fallback) {
+    final raw = _attrVal(_childEl(pr, attr)) ?? fallback;
+    switch (raw) {
+      case '':
+        return '.';
+      case '{':
+        return r'\{';
+      case '}':
+        return r'\}';
+      case '|':
+        return '|';
+      case '‖':
+        return r'\|';
+      case '⟨':
+        return r'\langle';
+      case '⟩':
+        return r'\rangle';
+      case '⌈':
+        return r'\lceil';
+      case '⌉':
+        return r'\rceil';
+      case '⌊':
+        return r'\lfloor';
+      case '⌋':
+        return r'\rfloor';
+      default:
+        return raw;
     }
   }
 }

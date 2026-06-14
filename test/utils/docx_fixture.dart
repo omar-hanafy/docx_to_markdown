@@ -267,11 +267,12 @@ String wFldSimple({required String instr, required String innerXml}) {
   return '<w:fldSimple w:instr="$escaped">$innerXml</w:fldSimple>';
 }
 
-String wDrawingImage({required String embedId, String? descr}) {
+String wDrawingImage({required String embedId, String? descr, String? title}) {
   final d = descr ?? 'Image';
+  final titleAttr = title == null ? '' : ' title="$title"';
   return '''<w:drawing>
   <wp:inline>
-    <wp:docPr id="1" name="Picture" descr="$d"/>
+    <wp:docPr id="1" name="Picture" descr="$d"$titleAttr/>
     <a:graphic>
       <a:graphicData>
         <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">

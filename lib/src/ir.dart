@@ -541,6 +541,34 @@ final class QuoteBlock extends Block {
   String toString() => 'QuoteBlock(blocks: ${blocks.length})';
 }
 
+/// The numbering symbol style for an ordered [ListBlock].
+///
+/// Mirrors the OOXML `w:numFmt` values that map to ordered lists. Bullet/none
+/// formats are represented by [ListBlock.ordered] being `false`, so this enum
+/// only enumerates ordered styles. Markdown renderers display ordered lists as
+/// decimals natively; the non-decimal values are meaningful for processors such
+/// as Pandoc that support fancy lists.
+///
+/// See also:
+/// - [ListBlock.numberFormat] where this is stored
+/// - [DocxToMarkdownConfig.orderedListMarker] for how it is rendered
+enum ListNumberFormat {
+  /// Arabic numerals: 1, 2, 3.
+  decimal,
+
+  /// Lowercase letters: a, b, c.
+  lowerAlpha,
+
+  /// Uppercase letters: A, B, C.
+  upperAlpha,
+
+  /// Lowercase Roman numerals: i, ii, iii.
+  lowerRoman,
+
+  /// Uppercase Roman numerals: I, II, III.
+  upperRoman,
+}
+
 /// Controls spacing between list items.
 ///
 /// Used by [ListBlock.tightness] to determine whether to insert blank lines
@@ -582,6 +610,7 @@ final class ListBlock extends Block {
     required this.ordered,
     required Iterable<ListItem> items,
     this.start = 1,
+    this.numberFormat = ListNumberFormat.decimal,
     this.tightness = ListTightness.auto,
     super.meta,
   }) : assert(start >= 1),
@@ -591,6 +620,12 @@ final class ListBlock extends Block {
   ///
   /// When `true`, items are numbered. When `false`, items use bullet markers.
   final bool ordered;
+
+  /// The numbering symbol style for ordered lists. Ignored when [ordered] is `false`.
+  ///
+  /// Defaults to [ListNumberFormat.decimal]. See
+  /// [DocxToMarkdownConfig.orderedListMarker] for how it is rendered per target.
+  final ListNumberFormat numberFormat;
 
   /// The starting number for ordered lists.
   ///
@@ -608,11 +643,17 @@ final class ListBlock extends Block {
   final List<ListItem> items;
 
   @override
-  List<Object?> get props => <Object?>[ordered, start, tightness, items];
+  List<Object?> get props => <Object?>[
+    ordered,
+    start,
+    numberFormat,
+    tightness,
+    items,
+  ];
 
   @override
   String toString() =>
-      'ListBlock(ordered: $ordered, start: $start, items: ${items.length}, tightness: $tightness)';
+      'ListBlock(ordered: $ordered, start: $start, numberFormat: $numberFormat, items: ${items.length}, tightness: $tightness)';
 }
 
 /// A single item in a list.
@@ -699,6 +740,24 @@ final class HorizontalRuleBlock extends Block {
 
   @override
   String toString() => 'HorizontalRuleBlock()';
+}
+
+/// An explicit page break from the source document.
+///
+/// Word stores these as `<w:br w:type="page"/>`. Markdown has no page concept,
+/// so rendering depends on [DocxToMarkdownConfig.pageBreakMode]; by default
+/// page breaks are dropped. Distinct from [HorizontalRuleBlock] so a real
+/// thematic break stays distinguishable.
+@immutable
+final class PageBreakBlock extends Block {
+  /// Creates a page break.
+  const PageBreakBlock({super.meta});
+
+  @override
+  List<Object?> get props => const <Object?>[];
+
+  @override
+  String toString() => 'PageBreakBlock()';
 }
 
 /// Raw HTML to be passed through to output.
@@ -924,6 +983,64 @@ final class UnderlineInline extends Inline {
 
   @override
   String toString() => 'UnderlineInline(children: ${children.length})';
+}
+
+/// Highlighted text (Word `w:highlight`).
+///
+/// Markdown has no native highlight syntax, so rendering depends on
+/// [DocxToMarkdownConfig.highlightMode]; by default highlighting is dropped and
+/// only the inner text is kept. [color] is the OOXML highlight name such as
+/// `"yellow"` or `"green"`.
+///
+/// See also:
+/// - [HighlightMode] for rendering options
+@immutable
+final class HighlightInline extends Inline {
+  /// Creates a highlight span with the given children and OOXML color name.
+  HighlightInline(Iterable<Inline> children, {required this.color, super.meta})
+    : children = _freezeList(children);
+
+  /// The highlighted content.
+  final List<Inline> children;
+
+  /// The OOXML highlight color name (e.g. `"yellow"`).
+  final String color;
+
+  @override
+  List<Object?> get props => <Object?>[color, children];
+
+  @override
+  String toString() =>
+      'HighlightInline(color: $color, children: ${children.length})';
+}
+
+/// Colored text (Word `w:color`).
+///
+/// Markdown has no native text-color syntax, so rendering depends on
+/// [DocxToMarkdownConfig.textColorMode]; by default color is dropped and only
+/// the inner text is kept. [color] is the OOXML color value: a hex string
+/// without the leading `#` (e.g. `"FF0000"`).
+///
+/// See also:
+/// - [TextColorMode] for rendering options
+@immutable
+final class ColorInline extends Inline {
+  /// Creates a colored span with the given children and OOXML color value.
+  ColorInline(Iterable<Inline> children, {required this.color, super.meta})
+    : children = _freezeList(children);
+
+  /// The colored content.
+  final List<Inline> children;
+
+  /// The OOXML color value: a hex string without `#` (e.g. `"FF0000"`).
+  final String color;
+
+  @override
+  List<Object?> get props => <Object?>[color, children];
+
+  @override
+  String toString() =>
+      'ColorInline(color: $color, children: ${children.length})';
 }
 
 /// Inline code (monospace text).
@@ -1288,6 +1405,12 @@ extension InlinePlainText on Iterable<Inline> {
           node.children.forEach(walk);
           return;
         case SubInline():
+          node.children.forEach(walk);
+          return;
+        case HighlightInline():
+          node.children.forEach(walk);
+          return;
+        case ColorInline():
           node.children.forEach(walk);
           return;
         case LinkInline():

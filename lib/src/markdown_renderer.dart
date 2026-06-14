@@ -144,6 +144,19 @@ class MarkdownRenderer {
       return;
     }
 
+    if (block is PageBreakBlock) {
+      switch (config.pageBreakMode) {
+        case PageBreakMode.ignore:
+          return;
+        case PageBreakMode.thematicBreak:
+          w.writeln('---', ctx);
+          return;
+        case PageBreakMode.htmlComment:
+          w.writeln('<!-- page break -->', ctx);
+          return;
+      }
+    }
+
     if (block is CodeBlock) {
       _renderFencedCodeBlock(w, ctx, block.text, language: block.language);
       return;
@@ -163,6 +176,19 @@ class MarkdownRenderer {
 
     if (block is TableBlock) {
       _renderTableBlock(block, w, ctx);
+      return;
+    }
+
+    if (block is ImageBlock) {
+      w.writeln(
+        _renderImageMarkdown(
+          src: block.src,
+          alt: block.alt,
+          title: block.title,
+          contextPath: 'block/image',
+        ),
+        ctx,
+      );
       return;
     }
 
@@ -260,6 +286,7 @@ class MarkdownRenderer {
         ctx,
         ordered: list.ordered,
         index: index,
+        numberFormat: list.numberFormat,
         listDepth: depth,
         loose: loose,
       );
@@ -302,6 +329,8 @@ class MarkdownRenderer {
       if (i is UnderlineInline && _containsHardBreak(i.children)) return true;
       if (i is SupInline && _containsHardBreak(i.children)) return true;
       if (i is SubInline && _containsHardBreak(i.children)) return true;
+      if (i is HighlightInline && _containsHardBreak(i.children)) return true;
+      if (i is ColorInline && _containsHardBreak(i.children)) return true;
       if (i is LinkInline && _containsHardBreak(i.children)) return true;
     }
     return false;
@@ -313,15 +342,19 @@ class MarkdownRenderer {
     _RenderContext ctx, {
     required bool ordered,
     required int index,
+    required ListNumberFormat numberFormat,
     required int listDepth,
     required bool loose,
   }) {
     final marker = ordered
-        ? '$index.'
+        ? _orderedMarker(numberFormat, index)
         : config.bulletMarkers[listDepth % config.bulletMarkers.length];
-    final markerPrefix = '${ctx.prefix}$marker ';
-    final hangingPrefix = ctx.prefix + ' ' * (marker.length + 1);
-    final listIndent = _listIndentForMarker(marker);
+    // Pandoc requires two spaces after a single capital-letter marker (A. / I.)
+    // so it is not mistaken for prose; one space is fine everywhere else.
+    final gap = (ordered && _needsWideGap(marker)) ? '  ' : ' ';
+    final markerPrefix = '${ctx.prefix}$marker$gap';
+    final hangingPrefix = ctx.prefix + ' ' * (marker.length + gap.length);
+    final listIndent = _listIndentForMarker(marker, gap.length);
 
     if (item.blocks.isEmpty) {
       w.writelnRaw(markerPrefix.trimRight());
@@ -380,10 +413,72 @@ class MarkdownRenderer {
     }
   }
 
-  int _listIndentForMarker(String marker) {
-    final minIndent = marker.length + 1;
+  int _listIndentForMarker(String marker, int gapLen) {
+    final minIndent = marker.length + gapLen;
     if (config.listIndent <= minIndent) return minIndent;
     return config.listIndent;
+  }
+
+  static final _singleCapitalMarkerRe = RegExp(r'^[A-Z]\.$');
+
+  /// Whether a marker is a single capital letter + period (`A.`, `I.`), which
+  /// Pandoc requires be followed by two spaces.
+  bool _needsWideGap(String marker) => _singleCapitalMarkerRe.hasMatch(marker);
+
+  /// Formats an ordered-list marker for [index] given its source [format].
+  ///
+  /// Decimal markers (and all markers when [OrderedListMarker.decimal] is in
+  /// effect) render as `index.`; [OrderedListMarker.preserveFormat] renders
+  /// Roman/alphabetic markers for Pandoc fancy lists.
+  String _orderedMarker(ListNumberFormat format, int index) {
+    if (config.orderedListMarker == OrderedListMarker.decimal) {
+      return '$index.';
+    }
+    switch (format) {
+      case ListNumberFormat.decimal:
+        return '$index.';
+      case ListNumberFormat.lowerAlpha:
+        return '${_toAlpha(index)}.';
+      case ListNumberFormat.upperAlpha:
+        return '${_toAlpha(index).toUpperCase()}.';
+      case ListNumberFormat.lowerRoman:
+        return '${_toRoman(index)}.';
+      case ListNumberFormat.upperRoman:
+        return '${_toRoman(index).toUpperCase()}.';
+    }
+  }
+
+  /// Converts [n] (1-based) to a bijective base-26 lowercase string: 1->a,
+  /// 26->z, 27->aa. Non-positive values fall back to the decimal form.
+  static String _toAlpha(int n) {
+    if (n <= 0) return '$n';
+    final units = <int>[];
+    var value = n;
+    while (value > 0) {
+      value--;
+      units.add(0x61 + value % 26);
+      value ~/= 26;
+    }
+    return String.fromCharCodes(units.reversed);
+  }
+
+  /// Converts [n] (1-based) to a lowercase Roman numeral. Non-positive values
+  /// fall back to the decimal form.
+  static String _toRoman(int n) {
+    if (n <= 0) return '$n';
+    const values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+    const symbols = [
+      'm', 'cm', 'd', 'cd', 'c', 'xc', 'l', 'xl', 'x', 'ix', 'v', 'iv', 'i', //
+    ];
+    final sb = StringBuffer();
+    var value = n;
+    for (var i = 0; i < values.length; i++) {
+      while (value >= values[i]) {
+        sb.write(symbols[i]);
+        value -= values[i];
+      }
+    }
+    return sb.toString();
   }
 
   // ---------------------------------------------------------------------------
@@ -643,6 +738,116 @@ class MarkdownRenderer {
   // Inlines
   // ---------------------------------------------------------------------------
 
+  /// Merges adjacent inline spans of identical type so that Word's split runs
+  /// (e.g. two consecutive bold runs, or a bold run followed by a bold-italic
+  /// run) render as a single emphasis span instead of fusing into ambiguous
+  /// Markdown delimiters such as `****` or `*****`.
+  ///
+  /// Applied recursively to children so the result is fully normalized
+  /// regardless of nesting. Only attribute-free wrappers and same-color
+  /// highlight/color spans merge; distinct-semantic nodes (code, links, images,
+  /// footnotes, line breaks, raw HTML) never merge. Merged nodes get a fresh
+  /// (null) [NodeMeta]; `meta` is non-semantic and excluded from equality.
+  List<Inline> _normalizeInlines(List<Inline> inlines) {
+    if (inlines.length < 2 &&
+        inlines.isNotEmpty &&
+        !_hasMergeableChildren(inlines.first)) {
+      return inlines;
+    }
+    final out = <Inline>[];
+    for (final node in inlines) {
+      final normalized = _normalizeInlineNode(node);
+      if (out.isNotEmpty) {
+        final merged = _tryMergeInlines(out.last, normalized);
+        if (merged != null) {
+          out[out.length - 1] = merged;
+          continue;
+        }
+      }
+      out.add(normalized);
+    }
+    return out;
+  }
+
+  bool _hasMergeableChildren(Inline node) =>
+      node is StrongInline ||
+      node is EmphInline ||
+      node is StrikeInline ||
+      node is UnderlineInline ||
+      node is SupInline ||
+      node is SubInline ||
+      node is HighlightInline ||
+      node is ColorInline ||
+      node is LinkInline;
+
+  /// Returns [node] with its children recursively normalized, preserving the
+  /// wrapper type and any attributes.
+  Inline _normalizeInlineNode(Inline node) {
+    if (node is StrongInline) {
+      return StrongInline(_normalizeInlines(node.children));
+    }
+    if (node is EmphInline) return EmphInline(_normalizeInlines(node.children));
+    if (node is StrikeInline) {
+      return StrikeInline(_normalizeInlines(node.children));
+    }
+    if (node is UnderlineInline) {
+      return UnderlineInline(_normalizeInlines(node.children));
+    }
+    if (node is SupInline) return SupInline(_normalizeInlines(node.children));
+    if (node is SubInline) return SubInline(_normalizeInlines(node.children));
+    if (node is HighlightInline) {
+      return HighlightInline(
+        _normalizeInlines(node.children),
+        color: node.color,
+      );
+    }
+    if (node is ColorInline) {
+      return ColorInline(_normalizeInlines(node.children), color: node.color);
+    }
+    if (node is LinkInline) {
+      return LinkInline(
+        url: node.url,
+        children: _normalizeInlines(node.children),
+        title: node.title,
+      );
+    }
+    return node;
+  }
+
+  /// Merges [a] and [b] when they are the same mergeable wrapper type, else
+  /// returns null. The merged child list is re-normalized to collapse any new
+  /// adjacency created at the seam.
+  Inline? _tryMergeInlines(Inline a, Inline b) {
+    if (a.runtimeType != b.runtimeType) return null;
+    List<Inline> seam(List<Inline> x, List<Inline> y) =>
+        _normalizeInlines([...x, ...y]);
+    if (a is StrongInline && b is StrongInline) {
+      return StrongInline(seam(a.children, b.children));
+    }
+    if (a is EmphInline && b is EmphInline) {
+      return EmphInline(seam(a.children, b.children));
+    }
+    if (a is StrikeInline && b is StrikeInline) {
+      return StrikeInline(seam(a.children, b.children));
+    }
+    if (a is UnderlineInline && b is UnderlineInline) {
+      return UnderlineInline(seam(a.children, b.children));
+    }
+    if (a is SupInline && b is SupInline) {
+      return SupInline(seam(a.children, b.children));
+    }
+    if (a is SubInline && b is SubInline) {
+      return SubInline(seam(a.children, b.children));
+    }
+    if (a is HighlightInline && b is HighlightInline && a.color == b.color) {
+      return HighlightInline(seam(a.children, b.children), color: a.color);
+    }
+    if (a is ColorInline && b is ColorInline && a.color == b.color) {
+      return ColorInline(seam(a.children, b.children), color: a.color);
+    }
+    return null;
+  }
+
   List<String> _renderParagraphLines(
     List<Inline> inlines, {
     required bool canBreak,
@@ -650,7 +855,7 @@ class MarkdownRenderer {
     // Produces multiple lines when encountering LineBreakInline.
     final b = _InlineBuffer();
 
-    for (final node in inlines) {
+    for (final node in _normalizeInlines(inlines)) {
       _emitInline(node, b, canBreak: canBreak);
     }
 
@@ -666,7 +871,7 @@ class MarkdownRenderer {
   }) {
     final b = _InlineBuffer();
 
-    for (final node in inlines) {
+    for (final node in _normalizeInlines(inlines)) {
       _emitInline(
         node,
         b,
@@ -732,37 +937,23 @@ class MarkdownRenderer {
         canBreak: false,
         breakAsBr: true,
       );
-      final url = config.hooks.rewriteLinkTarget?.call(node.url) ?? node.url;
-      out.write('[${_escapeLinkText(text)}](${_escapeLinkDestination(url)})');
+      final url = _rewriteLinkTarget(node.url, 'inline/link');
+      final destination = _linkDestinationWithTitle(url, node.title);
+      // `text` is already escaped by _renderInlineGroupAsText (and may contain
+      // intentional formatting like **bold**); do not escape it a second time.
+      out.write('[$text]($destination)');
       return;
     }
 
     if (node is ImageInline) {
-      final alt = _escapeLinkText(node.alt);
-      final src0 = config.hooks.rewriteImageTarget?.call(node.src) ?? node.src;
-      final src = _escapeLinkDestination(src0);
-
-      if (config.maxImageWidth > 0 &&
-          config.imageSizeMode != ImageSizeMode.none) {
-        switch (config.imageSizeMode) {
-          case ImageSizeMode.obsidian:
-            out.write('![$alt]($src =${config.maxImageWidth}x)');
-            break;
-          case ImageSizeMode.pandoc:
-            out.write('![$alt]($src){ width=${config.maxImageWidth}px }');
-            break;
-          case ImageSizeMode.none:
-            break;
-        }
-      } else if (config.maxImageWidth > 0) {
-        // If user requested max width, emit HTML <img> for portability.
-        out.write(
-          '<img src="${_escapeHtmlAttr(src0)}" alt="${_escapeHtmlAttr(node.alt)}" '
-          'width="${config.maxImageWidth}"/>',
-        );
-      } else {
-        out.write('![$alt]($src)');
-      }
+      out.write(
+        _renderImageMarkdown(
+          src: node.src,
+          alt: node.alt,
+          title: node.title,
+          contextPath: 'inline/image',
+        ),
+      );
       return;
     }
 
@@ -837,6 +1028,43 @@ class MarkdownRenderer {
       return;
     }
 
+    if (node is HighlightInline) {
+      final inner = _renderInlineGroupAsText(
+        node.children,
+        canBreak: false,
+        breakAsBr: true,
+      );
+      switch (config.highlightMode) {
+        case HighlightMode.none:
+          out.write(inner);
+          return;
+        case HighlightMode.mark:
+          out.write('<mark>$inner</mark>');
+          return;
+      }
+    }
+
+    if (node is ColorInline) {
+      final inner = _renderInlineGroupAsText(
+        node.children,
+        canBreak: false,
+        breakAsBr: true,
+      );
+      switch (config.textColorMode) {
+        case TextColorMode.none:
+          out.write(inner);
+          return;
+        case TextColorMode.htmlSpan:
+          final hex = node.color.startsWith('#')
+              ? node.color
+              : '#${node.color}';
+          out.write(
+            '<span style="color:${_escapeHtmlAttr(hex)}">$inner</span>',
+          );
+          return;
+      }
+    }
+
     // Defensive fallback
     out.write('');
   }
@@ -844,7 +1072,7 @@ class MarkdownRenderer {
   // HTML inline renderer (used for HTML tables)
   String _renderInlineGroupAsHtml(List<Inline> inlines) {
     final sb = StringBuffer();
-    for (final node in inlines) {
+    for (final node in _normalizeInlines(inlines)) {
       sb.write(_renderInlineAsHtml(node));
     }
     return sb.toString();
@@ -875,26 +1103,73 @@ class MarkdownRenderer {
     if (node is SubInline) {
       return '<sub>${_renderInlineGroupAsHtml(node.children)}</sub>';
     }
+    if (node is HighlightInline) {
+      final inner = _renderInlineGroupAsHtml(node.children);
+      return config.highlightMode == HighlightMode.mark
+          ? '<mark>$inner</mark>'
+          : inner;
+    }
+    if (node is ColorInline) {
+      final inner = _renderInlineGroupAsHtml(node.children);
+      if (config.textColorMode == TextColorMode.htmlSpan) {
+        final hex = node.color.startsWith('#') ? node.color : '#${node.color}';
+        return '<span style="color:${_escapeHtmlAttr(hex)}">$inner</span>';
+      }
+      return inner;
+    }
 
     if (node is LinkInline) {
-      final url0 = config.hooks.rewriteLinkTarget?.call(node.url) ?? node.url;
+      final url0 = _rewriteLinkTarget(node.url, 'html/link');
       final url = _escapeHtmlAttr(url0);
       final text = _renderInlineGroupAsHtml(node.children);
-      return '<a href="$url">$text</a>';
+      return '<a href="$url"${_htmlTitleAttr(node.title)}>$text</a>';
     }
 
     if (node is ImageInline) {
-      final src0 = config.hooks.rewriteImageTarget?.call(node.src) ?? node.src;
+      final src0 = _rewriteImageTarget(node.src, 'html/image');
       final src = _escapeHtmlAttr(src0);
       final alt = _escapeHtmlAttr(node.alt);
+      final title = _htmlTitleAttr(node.title);
 
       if (config.maxImageWidth > 0) {
-        return '<img src="$src" alt="$alt" width="${config.maxImageWidth}"/>';
+        return '<img src="$src" alt="$alt"$title width="${config.maxImageWidth}"/>';
       }
-      return '<img src="$src" alt="$alt"/>';
+      return '<img src="$src" alt="$alt"$title/>';
     }
 
     return '';
+  }
+
+  String _renderImageMarkdown({
+    required String src,
+    required String alt,
+    required String? title,
+    required String contextPath,
+  }) {
+    final escapedAlt = _escapeLinkText(alt);
+    final rewrittenSrc = _rewriteImageTarget(src, contextPath);
+    final destination = _linkDestinationWithTitle(rewrittenSrc, title);
+
+    if (config.maxImageWidth > 0 &&
+        config.imageSizeMode != ImageSizeMode.none) {
+      switch (config.imageSizeMode) {
+        case ImageSizeMode.obsidian:
+          return '![$escapedAlt]($destination =${config.maxImageWidth}x)';
+        case ImageSizeMode.pandoc:
+          return '![$escapedAlt]($destination){ width=${config.maxImageWidth}px }';
+        case ImageSizeMode.none:
+          break;
+      }
+    }
+
+    if (config.maxImageWidth > 0) {
+      final titleAttr = _htmlTitleAttr(title);
+      return '<img src="${_escapeHtmlAttr(rewrittenSrc)}" '
+          'alt="${_escapeHtmlAttr(alt)}"$titleAttr '
+          'width="${config.maxImageWidth}"/>';
+    }
+
+    return '![$escapedAlt]($destination)';
   }
 
   // ---------------------------------------------------------------------------
@@ -972,6 +1247,20 @@ class MarkdownRenderer {
     return '<$safe>';
   }
 
+  String _linkDestinationWithTitle(String url, String? title) {
+    final destination = _escapeLinkDestination(url);
+    if (title == null || title.isEmpty) return destination;
+    return '$destination "${_escapeLinkTitle(title)}"';
+  }
+
+  String _escapeLinkTitle(String title) {
+    final normalized = title
+        .replaceAll('\r\n', ' ')
+        .replaceAll('\n', ' ')
+        .replaceAll('\r', ' ');
+    return normalized.replaceAll('\\', r'\\').replaceAll('"', r'\"');
+  }
+
   String _escapeHtml(String text) {
     return text
         .replaceAll('&', '&amp;')
@@ -982,6 +1271,31 @@ class MarkdownRenderer {
   }
 
   String _escapeHtmlAttr(String text) => _escapeHtml(text);
+
+  String _htmlTitleAttr(String? title) {
+    if (title == null || title.isEmpty) return '';
+    return ' title="${_escapeHtmlAttr(title)}"';
+  }
+
+  HookContext _renderHookContext(String path) {
+    return HookContext(part: 'markdown_renderer', path: path);
+  }
+
+  String _rewriteLinkTarget(String url, String contextPath) {
+    return config.hooks.rewriteLinkTarget?.call(
+          url,
+          _renderHookContext(contextPath),
+        ) ??
+        url;
+  }
+
+  String _rewriteImageTarget(String src, String contextPath) {
+    return config.hooks.rewriteImageTarget?.call(
+          src,
+          _renderHookContext(contextPath),
+        ) ??
+        src;
+  }
 
   String _escapeHtmlComment(String text) {
     var cleaned = text.replaceAll('\n', ' ').replaceAll('\r', ' ').trim();
@@ -1060,6 +1374,7 @@ class MarkdownRenderer {
       return '[table]';
     }
     if (block is HorizontalRuleBlock) return '---';
+    if (block is PageBreakBlock) return '';
 
     return '';
   }
@@ -1217,7 +1532,24 @@ class _LineWriter {
 class _InlineBuffer {
   final List<String> lines = [''];
 
+  // Emphasis delimiters whose runs fuse when two spans abut (e.g. a closing
+  // `**` meeting an opening `*` yields `***`). When that happens we insert an
+  // inert HTML comment, which separates the delimiter runs and renders to
+  // nothing in CommonMark, GFM, and Pandoc.
+  static const _emphasisDelimiters = {'*', '_', '~'};
+
   void write(String s) {
+    if (s.isNotEmpty) {
+      final cur = lines.last;
+      if (cur.isNotEmpty) {
+        final last = cur[cur.length - 1];
+        if (last == s[0] &&
+            _emphasisDelimiters.contains(last) &&
+            !cur.endsWith('\\$last')) {
+          lines[lines.length - 1] = '$cur<!-- -->';
+        }
+      }
+    }
     lines[lines.length - 1] = lines.last + s;
   }
 

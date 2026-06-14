@@ -20,6 +20,33 @@ void main() {
       expect(a.hashCode, equals(b.hashCode));
     });
 
+    test('HighlightInline and ColorInline equality reflects color', () {
+      final yellow = HighlightInline([const TextInline('x')], color: 'yellow');
+      expect(
+        yellow == HighlightInline([const TextInline('x')], color: 'green'),
+        isFalse,
+      );
+      expect(
+        yellow,
+        equals(HighlightInline([const TextInline('x')], color: 'yellow')),
+      );
+
+      final red = ColorInline([const TextInline('x')], color: 'FF0000');
+      expect(
+        red == ColorInline([const TextInline('x')], color: '00FF00'),
+        isFalse,
+      );
+      expect(
+        red,
+        equals(ColorInline([const TextInline('x')], color: 'FF0000')),
+      );
+    });
+
+    test('PageBreakBlock equals itself and differs from a horizontal rule', () {
+      expect(const PageBreakBlock(), equals(const PageBreakBlock()));
+      expect(const PageBreakBlock() == const HorizontalRuleBlock(), isFalse);
+    });
+
     test('Document equality ignores footnote map order', () {
       final fn1 = FootnoteDefinition(
         id: '1',
@@ -48,6 +75,22 @@ void main() {
       );
 
       expect(docA, equals(docB));
+    });
+
+    test('ListBlock equality reflects numberFormat', () {
+      ListItem item() => ListItem(
+        blocks: [
+          ParagraphBlock([const TextInline('x')]),
+        ],
+      );
+      final decimal = ListBlock(ordered: true, items: [item()]);
+      final roman = ListBlock(
+        ordered: true,
+        items: [item()],
+        numberFormat: ListNumberFormat.upperRoman,
+      );
+      expect(decimal == roman, isFalse);
+      expect(decimal, equals(ListBlock(ordered: true, items: [item()])));
     });
   });
 

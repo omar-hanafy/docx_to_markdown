@@ -1,5 +1,4 @@
 import 'package:docx_to_markdown/docx_to_markdown.dart';
-import 'package:docx_to_markdown/src/ir.dart';
 import 'package:docx_to_markdown/src/markdown_renderer.dart';
 import 'package:test/test.dart';
 
@@ -53,6 +52,131 @@ void main() {
       expect(
         markdown.trim(),
         'A **B** *I* <u>U</u> ~~S~~ <sub>2</sub> <sup>3</sup> ``code`tick``',
+      );
+    });
+
+    test('merges adjacent same-type emphasis into one span', () {
+      // Word splits styled phrases into adjacent runs; without merging these
+      // fuse into invalid `****` delimiter runs.
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            StrongInline([const TextInline('bold')]),
+            StrongInline([const TextInline(' ')]),
+            StrongInline([
+              EmphInline([const TextInline('bold italics')]),
+            ]),
+          ]),
+        ],
+      );
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+      expect(markdown.trim(), '**bold *bold italics***');
+    });
+
+    test('separates colliding cross-type emphasis with an HTML comment', () {
+      // `***X***` (bold-italic) immediately followed by `*Y*` (italic) would
+      // fuse into `****`; the collision guard inserts an inert separator.
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            StrongInline([
+              EmphInline([const TextInline('X')]),
+            ]),
+            EmphInline([const TextInline('Y')]),
+          ]),
+        ],
+      );
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+      expect(markdown.trim(), '***X***<!-- -->*Y*');
+      expect(markdown, isNot(contains('****')));
+    });
+
+    test('merges adjacent underline runs', () {
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            UnderlineInline([const TextInline('one ')]),
+            UnderlineInline([const TextInline('two')]),
+          ]),
+        ],
+      );
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+      expect(markdown.trim(), '<u>one two</u>');
+    });
+
+    test('renders highlight per highlightMode', () {
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            HighlightInline([const TextInline('x')], color: 'yellow'),
+          ]),
+        ],
+      );
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig(highlightMode: HighlightMode.mark),
+        ).render(doc).trim(),
+        '<mark>x</mark>',
+      );
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig.defaults,
+        ).render(doc).trim(),
+        'x',
+      );
+    });
+
+    test('renders color per textColorMode', () {
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            ColorInline([const TextInline('x')], color: 'FF0000'),
+          ]),
+        ],
+      );
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig(textColorMode: TextColorMode.htmlSpan),
+        ).render(doc).trim(),
+        '<span style="color:#FF0000">x</span>',
+      );
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig.defaults,
+        ).render(doc).trim(),
+        'x',
+      );
+    });
+
+    test('renders page break per pageBreakMode', () {
+      final doc = Document(blocks: [const PageBreakBlock()]);
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig(
+            pageBreakMode: PageBreakMode.thematicBreak,
+          ),
+        ).render(doc).trim(),
+        '---',
+      );
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig(
+            pageBreakMode: PageBreakMode.htmlComment,
+          ),
+        ).render(doc).trim(),
+        '<!-- page break -->',
+      );
+      expect(
+        MarkdownRenderer(
+          config: DocxToMarkdownConfig.defaults,
+        ).render(doc).trim(),
+        '',
       );
     });
 
@@ -489,6 +613,7 @@ World
     });
 
     test('rewrites link and image targets via hooks', () {
+      final hookLocations = <String>[];
       final doc = Document(
         blocks: [
           ParagraphBlock([
@@ -504,12 +629,85 @@ World
       final markdown = MarkdownRenderer(
         config: DocxToMarkdownConfig(
           hooks: DocxToMarkdownHooks(
-            rewriteLinkTarget: (url, [ctx]) => 'https://new.example',
-            rewriteImageTarget: (src, [ctx]) => 'new.png',
+            rewriteLinkTarget: (url, [ctx]) {
+              hookLocations.add(ctx?.location ?? 'missing');
+              return 'https://new.example';
+            },
+            rewriteImageTarget: (src, [ctx]) {
+              hookLocations.add(ctx?.location ?? 'missing');
+              return 'new.png';
+            },
           ),
         ),
       ).render(doc);
       expect(markdown.trim(), '[Link](https://new.example) ![Alt](new.png)');
+      expect(hookLocations, [
+        'markdown_renderer::inline/link',
+        'markdown_renderer::inline/image',
+      ]);
+    });
+
+    test('renders link and image titles', () {
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            LinkInline(
+              url: 'https://example.com',
+              title: 'A "title"',
+              children: [const TextInline('Link')],
+            ),
+            const TextInline(' '),
+            const ImageInline(src: 'img.png', alt: 'Alt', title: 'Image title'),
+          ]),
+        ],
+      );
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+      expect(
+        markdown.trim(),
+        r'[Link](https://example.com "A \"title\"") ![Alt](img.png "Image title")',
+      );
+    });
+
+    test('does not double-escape link text', () {
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            LinkInline(
+              url: '#ref_target',
+              children: [
+                const TextInline('ref_fig'),
+                StrongInline([const TextInline('bold')]),
+              ],
+            ),
+          ]),
+        ],
+      );
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+      // Underscore escaped exactly once; bold markers preserved, not escaped.
+      expect(markdown.trim(), r'[ref\_fig**bold**](#ref_target)');
+    });
+
+    test('renders image blocks with rewrite hooks', () {
+      String? hookLocation;
+      final doc = Document(
+        blocks: const [ImageBlock(src: 'old.png', alt: 'Alt', title: 'Title')],
+      );
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig(
+          hooks: DocxToMarkdownHooks(
+            rewriteImageTarget: (src, [ctx]) {
+              hookLocation = ctx?.location;
+              return 'new.png';
+            },
+          ),
+        ),
+      ).render(doc);
+      expect(markdown.trim(), '![Alt](new.png "Title")');
+      expect(hookLocation, 'markdown_renderer::block/image');
     });
 
     test('renders blockquotes', () {
