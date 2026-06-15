@@ -38,6 +38,12 @@ class DocxRelTypes {
       'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image';
   static const hyperlink =
       'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink';
+  static const coreProperties =
+      'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties';
+  static const customProperties =
+      'http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties';
+  static const extendedProperties =
+      'http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties';
 }
 
 Uint8List buildDocxBytes({
@@ -51,14 +57,40 @@ Uint8List buildDocxBytes({
   String? footnotesXml,
   String? endnotesXml,
   String? commentsXml,
+  String? coreXml,
+  String? customXml,
   Map<String, Uint8List> media = const {},
   Map<String, String> extraXmlParts = const {},
 }) {
   final files = <String, Uint8List>{};
+  // Package-root relationships, seeded with the caller's and extended with the
+  // metadata parts below so docProps resolution exercises the real rels path.
+  final rootRels = <DocxRel>[...packageRels];
 
   if (includeDocumentXml) {
     files[documentPath] = Uint8List.fromList(
       utf8.encode(documentXml ?? docXmlWithBody('')),
+    );
+  }
+
+  if (coreXml != null) {
+    files['docProps/core.xml'] = Uint8List.fromList(utf8.encode(coreXml));
+    rootRels.add(
+      const DocxRel(
+        id: 'rIdCore',
+        type: DocxRelTypes.coreProperties,
+        target: 'docProps/core.xml',
+      ),
+    );
+  }
+  if (customXml != null) {
+    files['docProps/custom.xml'] = Uint8List.fromList(utf8.encode(customXml));
+    rootRels.add(
+      const DocxRel(
+        id: 'rIdCustom',
+        type: DocxRelTypes.customProperties,
+        target: 'docProps/custom.xml',
+      ),
     );
   }
 
@@ -82,13 +114,7 @@ Uint8List buildDocxBytes({
     files[entry.key] = Uint8List.fromList(utf8.encode(entry.value));
   }
 
-  if (packageRels.isNotEmpty) {
-    files['_rels/.rels'] = Uint8List.fromList(
-      utf8.encode(relsXml(packageRels)),
-    );
-  } else {
-    files['_rels/.rels'] = Uint8List.fromList(utf8.encode(relsXml(const [])));
-  }
+  files['_rels/.rels'] = Uint8List.fromList(utf8.encode(relsXml(rootRels)));
 
   if (documentRels.isNotEmpty) {
     final relsPath = _relsPathForPart(documentPath);

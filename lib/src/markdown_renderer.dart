@@ -14,6 +14,7 @@
 
 import 'package:docx_to_markdown/src/config.dart';
 import 'package:docx_to_markdown/src/ir.dart';
+import 'package:docx_to_markdown/src/metadata_yaml.dart';
 
 /// Renders the intermediate [Document] structure into a Markdown string.
 ///
@@ -56,6 +57,19 @@ class MarkdownRenderer {
       preserveHardBreaks: config.lineBreakStyle == LineBreakStyle.hardBreak,
     );
     final root = _RenderContext.root();
+
+    // Optional YAML front matter, emitted before the body and separated from it
+    // by a blank line. Only when explicitly enabled and metadata is present.
+    if (config.metadataMode == MetadataMode.yamlFrontMatter &&
+        document.metadata.isNotEmpty) {
+      final frontMatter = renderMetadataFrontMatter(document.metadata);
+      if (frontMatter.isNotEmpty) {
+        for (final line in frontMatter.split('\n')) {
+          w.writelnRaw(line);
+        }
+        w.ensureBlankLine(root);
+      }
+    }
 
     _renderBlocks(document.blocks, w, root, separateWithBlankLine: true);
 
@@ -174,6 +188,11 @@ class MarkdownRenderer {
       return;
     }
 
+    if (block is DefinitionListBlock) {
+      _renderDefinitionList(block, w, ctx);
+      return;
+    }
+
     if (block is TableBlock) {
       _renderTableBlock(block, w, ctx);
       return;
@@ -289,10 +308,16 @@ class MarkdownRenderer {
         ordered: list.ordered,
         index: index,
         numberFormat: list.numberFormat,
+        markerTemplate: _listMarkerTemplate(list),
         listDepth: depth,
         loose: loose,
       );
     }
+  }
+
+  String? _listMarkerTemplate(ListBlock list) {
+    final value = list.meta?.attributes['lvlText'];
+    return value is String ? value : null;
   }
 
   int _orderedListIndexForItem(ListBlock list, int itemIndex) {
@@ -345,11 +370,12 @@ class MarkdownRenderer {
     required bool ordered,
     required int index,
     required ListNumberFormat numberFormat,
+    required String? markerTemplate,
     required int listDepth,
     required bool loose,
   }) {
     final baseMarker = ordered
-        ? _orderedMarker(numberFormat, index)
+        ? _orderedMarker(numberFormat, index, markerTemplate: markerTemplate)
         : config.bulletMarkers[listDepth % config.bulletMarkers.length];
     final marker = item.checked == null
         ? baseMarker
@@ -435,22 +461,46 @@ class MarkdownRenderer {
   /// Decimal markers (and all markers when [OrderedListMarker.decimal] is in
   /// effect) render as `index.`; [OrderedListMarker.preserveFormat] renders
   /// Roman/alphabetic markers for Pandoc fancy lists.
-  String _orderedMarker(ListNumberFormat format, int index) {
+  String _orderedMarker(
+    ListNumberFormat format,
+    int index, {
+    String? markerTemplate,
+  }) {
     if (config.orderedListMarker == OrderedListMarker.decimal) {
       return '$index.';
     }
+    final value = _orderedMarkerValue(format, index);
+    final templated = markerTemplate == null
+        ? null
+        : _applyOrderedMarkerTemplate(markerTemplate, value);
+    return templated ?? '$value.';
+  }
+
+  String _orderedMarkerValue(ListNumberFormat format, int index) {
     switch (format) {
       case ListNumberFormat.decimal:
-        return '$index.';
+        return '$index';
       case ListNumberFormat.lowerAlpha:
-        return '${_toAlpha(index)}.';
+        return _toAlpha(index);
       case ListNumberFormat.upperAlpha:
-        return '${_toAlpha(index).toUpperCase()}.';
+        return _toAlpha(index).toUpperCase();
       case ListNumberFormat.lowerRoman:
-        return '${_toRoman(index)}.';
+        return _toRoman(index);
       case ListNumberFormat.upperRoman:
-        return '${_toRoman(index).toUpperCase()}.';
+        return _toRoman(index).toUpperCase();
     }
+  }
+
+  String? _applyOrderedMarkerTemplate(String template, String markerValue) {
+    final matches = RegExp(r'%\d+').allMatches(template).toList();
+    if (matches.length != 1) return null;
+    final marker = template.replaceRange(
+      matches.single.start,
+      matches.single.end,
+      markerValue,
+    );
+    final trimmed = marker.trim();
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   /// Converts [n] (1-based) to a bijective base-26 lowercase string: 1->a,
@@ -484,6 +534,141 @@ class MarkdownRenderer {
       }
     }
     return sb.toString();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Definition lists
+  // ---------------------------------------------------------------------------
+
+  /// Renders a definition list per [DocxToMarkdownConfig.definitionListMode].
+  void _renderDefinitionList(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    switch (config.definitionListMode) {
+      case DefinitionListMode.html:
+        _renderDefinitionListHtml(list, w, ctx);
+        return;
+      case DefinitionListMode.pandoc:
+        _renderDefinitionListPandoc(list, w, ctx);
+        return;
+      case DefinitionListMode.paragraphs:
+        _renderDefinitionListParagraphs(list, w, ctx);
+        return;
+    }
+  }
+
+  /// Emits an HTML `<dl>`. A single-paragraph definition is inlined into the
+  /// `<dd>`; a multi-block definition wraps each block (`<p>`, `<pre>`, lists)
+  /// on its own line. A term with no definition emits a `<dt>` without a `<dd>`.
+  void _renderDefinitionListHtml(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    w.writeln('<dl>', ctx);
+    for (final item in list.items) {
+      w.writeln('<dt>${_renderInlineGroupAsHtml(item.term).trim()}</dt>', ctx);
+      final defs = item.definitions;
+      if (defs.isEmpty) continue;
+      if (defs.length == 1 && defs.first is ParagraphBlock) {
+        final inner = _renderInlineGroupAsHtml(
+          (defs.first as ParagraphBlock).inlines,
+        ).trim();
+        w.writeln('<dd>$inner</dd>', ctx);
+      } else {
+        w.writeln('<dd>', ctx);
+        for (final b in defs) {
+          for (final line in _definitionBlockHtml(b)) {
+            w.writeln(line, ctx);
+          }
+        }
+        w.writeln('</dd>', ctx);
+      }
+    }
+    w.writeln('</dl>', ctx);
+  }
+
+  List<String> _definitionBlockHtml(Block b) {
+    if (b is ParagraphBlock) {
+      return ['<p>${_renderInlineGroupAsHtml(b.inlines).trim()}</p>'];
+    }
+    if (b is CodeBlock) {
+      return ['<pre><code>${_escapeHtml(b.text)}</code></pre>'];
+    }
+    if (b is ListBlock) {
+      return [_renderListAsHtml(b)];
+    }
+    // Fallback for any other block type: keep the text rather than drop it.
+    return ['<p>${_escapeHtml(_renderBlockAsPlainText(b)).trim()}</p>'];
+  }
+
+  /// Emits Pandoc definition syntax: the term, a blank line, then the body with
+  /// its first line marked `:   ` and continuation lines indented four spaces
+  /// (the same continuation shape Pandoc uses).
+  void _renderDefinitionListPandoc(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    for (var i = 0; i < list.items.length; i++) {
+      if (i > 0) w.ensureBlankLine(ctx);
+      final item = list.items[i];
+      final term = _renderInlineGroupAsText(
+        item.term,
+        canBreak: false,
+        breakAsBr: true,
+      ).trim();
+      w.writeln(_escapeParagraphLineStartIfNeeded(term), ctx);
+      if (item.definitions.isEmpty) continue;
+      w.ensureBlankLine(ctx);
+
+      final tmp = _LineWriter(
+        trimTrailingWhitespace: config.trimTrailingWhitespace,
+        preserveHardBreaks: config.lineBreakStyle == LineBreakStyle.hardBreak,
+      );
+      _renderBlocks(
+        item.definitions,
+        tmp,
+        _RenderContext.root(),
+        separateWithBlankLine: true,
+      );
+      final lines = tmp.toString().split('\n');
+      var firstBodyLine = true;
+      for (final line in lines) {
+        if (firstBodyLine) {
+          w.writelnRaw('${ctx.prefix}:   $line');
+          firstBodyLine = false;
+        } else if (line.isEmpty) {
+          w.writelnRaw(ctx.prefix.trimRight());
+        } else {
+          w.writelnRaw('${ctx.prefix}    $line');
+        }
+      }
+    }
+  }
+
+  /// Degrades the list to flat output: the term as its own paragraph followed
+  /// by the definition blocks rendered normally.
+  void _renderDefinitionListParagraphs(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    var first = true;
+    for (final item in list.items) {
+      if (!first) w.ensureBlankLine(ctx);
+      first = false;
+      final termLines = _renderParagraphLines(item.term, canBreak: true);
+      for (final line in termLines) {
+        w.writeln(_escapeParagraphLineStartIfNeeded(line), ctx);
+      }
+      for (final b in item.definitions) {
+        w.ensureBlankLine(ctx);
+        _renderBlock(b, w, ctx);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1494,6 +1679,19 @@ class MarkdownRenderer {
     }
     if (block is HorizontalRuleBlock) return '---';
     if (block is PageBreakBlock) return '';
+    if (block is DefinitionListBlock) {
+      return block.items
+          .map((it) {
+            final term = _renderInlineGroupAsText(
+              it.term,
+              canBreak: false,
+              breakAsBr: false,
+            );
+            final body = it.definitions.map(_renderBlockAsPlainText).join('\n');
+            return body.isEmpty ? term : '$term\n$body';
+          })
+          .join('\n');
+    }
 
     return '';
   }

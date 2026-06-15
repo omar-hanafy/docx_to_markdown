@@ -150,6 +150,34 @@ enum PageBreakMode {
   htmlComment,
 }
 
+/// Controls how definition lists (`Definition Term` / `Definition` paragraph
+/// styles) are rendered.
+///
+/// Markdown has no native definition-list syntax, so the parser always builds a
+/// semantic [DefinitionListBlock] and this mode decides how it is presented.
+///
+/// See also:
+/// - [DefinitionListBlock] which carries the structure through the IR
+enum DefinitionListMode {
+  /// Emits an HTML `<dl><dt><dd>` block.
+  ///
+  /// The default. Renders in GitHub Flavored Markdown, CommonMark, and Pandoc,
+  /// so it is the safe cross-renderer choice for the GFM default flavor.
+  html,
+
+  /// Emits Pandoc definition-list syntax (the term, then `:   ` definitions).
+  ///
+  /// Use when the target is Pandoc (or a processor that supports its
+  /// `definition_lists` extension). Renders as literal text elsewhere.
+  pandoc,
+
+  /// Degrades to flat output: the term as its own paragraph followed by the
+  /// definition paragraphs.
+  ///
+  /// Use to opt out of grouping and keep plain, portable Markdown.
+  paragraphs,
+}
+
 /// Determines how unrecognized OOXML elements are handled during parsing.
 ///
 /// The DOCX format has many features (SmartArt, charts, embedded objects) that
@@ -297,6 +325,27 @@ enum ImageSizeMode {
   /// Supported by Pandoc and compatible processors. Enables precise control
   /// over image dimensions in PDF and HTML output.
   pandoc,
+}
+
+/// Controls whether document metadata (`docProps/core.xml` and
+/// `docProps/custom.xml`) is rendered ahead of the document body.
+///
+/// Parsing always populates [Document.metadata] regardless of this setting;
+/// this only controls rendering. The default preserves historical output.
+///
+/// See also:
+/// - [DocxToMarkdownConfig.metadataMode] where this is configured
+/// - [DocumentMetadata] for the parsed metadata model
+enum MetadataMode {
+  /// Do not render metadata. This is the default; Markdown output is unchanged.
+  none,
+
+  /// Render metadata as a Pandoc-style YAML front matter block before the
+  /// document body, but only when [Document.metadata] is non-empty.
+  ///
+  /// Keys use Pandoc-friendly names (e.g. `creator` becomes `author`,
+  /// `language` becomes `lang`); custom properties are nested under `custom`.
+  yamlFrontMatter,
 }
 
 /// Maps a Word paragraph style to a specific Markdown block type.
@@ -644,7 +693,9 @@ class DocxToMarkdownConfig {
     this.highlightMode = HighlightMode.none,
     this.textColorMode = TextColorMode.none,
     this.pageBreakMode = PageBreakMode.ignore,
+    this.definitionListMode = DefinitionListMode.html,
     this.unknownElementPolicy = UnknownElementPolicy.keepText,
+    this.metadataMode = MetadataMode.none,
 
     // What content to include
     this.extractImages = true,
@@ -747,10 +798,21 @@ class DocxToMarkdownConfig {
   /// See [PageBreakMode] for options.
   final PageBreakMode pageBreakMode;
 
+  /// How to render definition lists. Defaults to [DefinitionListMode.html].
+  ///
+  /// See [DefinitionListMode] for options.
+  final DefinitionListMode definitionListMode;
+
   /// What to do with unrecognized OOXML elements. Defaults to [UnknownElementPolicy.keepText].
   ///
   /// See [UnknownElementPolicy] for options.
   final UnknownElementPolicy unknownElementPolicy;
+
+  /// Whether and how to render document metadata. Defaults to
+  /// [MetadataMode.none], which leaves Markdown output unchanged.
+  ///
+  /// See [MetadataMode] for options.
+  final MetadataMode metadataMode;
 
   // --------------------------------------------------------------------------
   // Content toggles
@@ -931,7 +993,9 @@ class DocxToMarkdownConfig {
     HighlightMode? highlightMode,
     TextColorMode? textColorMode,
     PageBreakMode? pageBreakMode,
+    DefinitionListMode? definitionListMode,
     UnknownElementPolicy? unknownElementPolicy,
+    MetadataMode? metadataMode,
     bool? extractImages,
     bool? includeFootnotes,
     bool? includeEndnotes,
@@ -963,7 +1027,9 @@ class DocxToMarkdownConfig {
       highlightMode: highlightMode ?? this.highlightMode,
       textColorMode: textColorMode ?? this.textColorMode,
       pageBreakMode: pageBreakMode ?? this.pageBreakMode,
+      definitionListMode: definitionListMode ?? this.definitionListMode,
       unknownElementPolicy: unknownElementPolicy ?? this.unknownElementPolicy,
+      metadataMode: metadataMode ?? this.metadataMode,
       extractImages: extractImages ?? this.extractImages,
       includeFootnotes: includeFootnotes ?? this.includeFootnotes,
       includeEndnotes: includeEndnotes ?? this.includeEndnotes,
@@ -1005,7 +1071,9 @@ class DocxToMarkdownConfig {
         'highlightMode: $highlightMode, '
         'textColorMode: $textColorMode, '
         'pageBreakMode: $pageBreakMode, '
+        'definitionListMode: $definitionListMode, '
         'unknownElementPolicy: $unknownElementPolicy, '
+        'metadataMode: $metadataMode, '
         'extractImages: $extractImages, '
         'includeFootnotes: $includeFootnotes, '
         'includeEndnotes: $includeEndnotes, '

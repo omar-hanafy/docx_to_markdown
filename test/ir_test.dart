@@ -94,6 +94,85 @@ void main() {
     });
   });
 
+  group('DocumentMetadata', () {
+    test('empty metadata is stable and isEmpty', () {
+      expect(DocumentMetadata.empty.isEmpty, isTrue);
+      expect(DocumentMetadata.empty.isNotEmpty, isFalse);
+      expect(DocumentMetadata(), equals(DocumentMetadata.empty));
+      expect(DocumentMetadata().hashCode, DocumentMetadata.empty.hashCode);
+    });
+
+    test('any single field makes metadata non-empty', () {
+      expect(DocumentMetadata(title: 'T').isEmpty, isFalse);
+      expect(DocumentMetadata(created: '2025').isEmpty, isFalse);
+      expect(DocumentMetadata(keywords: const ['k']).isEmpty, isFalse);
+      expect(DocumentMetadata(custom: const {'a': 'b'}).isEmpty, isFalse);
+      expect(DocumentMetadata(extra: const {'x': 'y'}).isEmpty, isFalse);
+    });
+
+    test('value equality covers all fields', () {
+      DocumentMetadata make() => DocumentMetadata(
+        title: 'T',
+        creator: 'C',
+        subject: 'S',
+        description: 'D',
+        keywords: const ['k1', 'k2'],
+        language: 'en',
+        category: 'G',
+        created: 'c',
+        modified: 'm',
+        lastModifiedBy: 'L',
+        revision: 'R',
+        custom: const {'a': '1'},
+        extra: const {'e': '2'},
+      );
+      expect(make(), equals(make()));
+      expect(make().hashCode, make().hashCode);
+      expect(make() == make().copyWith(title: 'X'), isFalse);
+      expect(make() == make().copyWith(keywords: const ['k1']), isFalse);
+      expect(make() == make().copyWith(custom: const {'a': '2'}), isFalse);
+    });
+
+    test('keywords, custom and extra are unmodifiable', () {
+      final m = DocumentMetadata(
+        keywords: ['k'],
+        custom: {'a': 'b'},
+        extra: {'x': 'y'},
+      );
+      expect(() => m.keywords.add('z'), throwsUnsupportedError);
+      expect(() => m.custom['c'] = 'd', throwsUnsupportedError);
+      expect(() => m.extra['z'] = 'w', throwsUnsupportedError);
+    });
+
+    test('copyWith replaces only the given fields', () {
+      final base = DocumentMetadata(title: 'T', creator: 'C');
+      final copy = base.copyWith(creator: 'C2', subject: 'S');
+      expect(copy.title, 'T');
+      expect(copy.creator, 'C2');
+      expect(copy.subject, 'S');
+    });
+
+    test('Document carries empty metadata by default', () {
+      final doc = Document(blocks: const []);
+      expect(doc.metadata, equals(DocumentMetadata.empty));
+    });
+
+    test('Document semantic equality reflects metadata', () {
+      Document make(DocumentMetadata meta) => Document(
+        blocks: [
+          ParagraphBlock([const TextInline('body')]),
+        ],
+        metadata: meta,
+      );
+      expect(make(DocumentMetadata.empty), equals(make(DocumentMetadata())));
+      expect(
+        make(DocumentMetadata(title: 'A')) ==
+            make(DocumentMetadata(title: 'B')),
+        isFalse,
+      );
+    });
+  });
+
   group('InlinePlainText', () {
     test('extracts text from nested inlines', () {
       final inlines = <Inline>[

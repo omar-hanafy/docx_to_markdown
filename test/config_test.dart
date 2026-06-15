@@ -86,6 +86,27 @@ void main() {
         throwsA(isA<AssertionError>()),
       );
     });
+
+    test('metadataMode defaults to none', () {
+      expect(DocxToMarkdownConfig.defaults.metadataMode, MetadataMode.none);
+      expect(DocxToMarkdownConfig().metadataMode, MetadataMode.none);
+    });
+
+    test('copyWith overrides metadataMode and preserves it', () {
+      final copy = DocxToMarkdownConfig.defaults.copyWith(
+        metadataMode: MetadataMode.yamlFrontMatter,
+      );
+      expect(copy.metadataMode, MetadataMode.yamlFrontMatter);
+      // Unspecified copyWith preserves the overridden value.
+      expect(copy.copyWith().metadataMode, MetadataMode.yamlFrontMatter);
+    });
+
+    test('toString includes metadataMode', () {
+      expect(
+        DocxToMarkdownConfig.defaults.toString(),
+        contains('metadataMode: MetadataMode.none'),
+      );
+    });
   });
 
   group('ParagraphStyleOverride', () {

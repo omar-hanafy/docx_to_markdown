@@ -14,4 +14,7 @@
   - Links and Footnotes.
   - Math equations (OMML to LaTeX hooks).
   - Code blocks (fenced, with language detection).
+  - Document metadata: parses `docProps/core.xml` and `docProps/custom.xml`
+    into `Document.metadata`, with optional Pandoc-style YAML front matter via
+    `MetadataMode.yamlFrontMatter` (off by default).
 - Configurable hooks for custom transformations.

@@ -100,6 +100,16 @@ class DocxRelTypeSuffix {
 
   /// Suffix for embedded image relationships.
   static const image = '/relationships/image';
+
+  /// Suffix for the core-properties relationship (`docProps/core.xml`).
+  ///
+  /// Linked from the package root, not the main document part.
+  static const coreProperties = '/core-properties';
+
+  /// Suffix for the custom-properties relationship (`docProps/custom.xml`).
+  ///
+  /// Linked from the package root, not the main document part.
+  static const customProperties = '/custom-properties';
 }
 
 /// A single OPC relationship parsed from a `.rels` file.
@@ -215,6 +225,8 @@ class DocxPackage {
   String? _commentsPartPath;
   String? _footnotesPartPath;
   String? _endnotesPartPath;
+  String? _corePropertiesPartPath;
+  String? _customPropertiesPartPath;
 
   /// Open a .docx from disk.
   ///
@@ -394,6 +406,39 @@ class DocxPackage {
         _partFromDocumentRelType(DocxRelTypeSuffix.endnotes) ??
         _existingFallback('word/endnotes.xml');
   }
+
+  /// The canonical path to `docProps/core.xml`, resolved via the package-root
+  /// relationships (type suffix `/core-properties`), with a fallback to the
+  /// conventional `docProps/core.xml` path.
+  ///
+  /// Returns `null` if the core properties part is missing.
+  String? get corePropertiesPartPath {
+    _ensureOpen();
+    return _corePropertiesPartPath ??=
+        _partFromRootRelType(DocxRelTypeSuffix.coreProperties) ??
+        _existingFallback('docProps/core.xml');
+  }
+
+  /// The canonical path to `docProps/custom.xml`, resolved via the package-root
+  /// relationships (type suffix `/custom-properties`), with a fallback to the
+  /// conventional `docProps/custom.xml` path.
+  ///
+  /// Returns `null` if the custom properties part is missing.
+  String? get customPropertiesPartPath {
+    _ensureOpen();
+    return _customPropertiesPartPath ??=
+        _partFromRootRelType(DocxRelTypeSuffix.customProperties) ??
+        _existingFallback('docProps/custom.xml');
+  }
+
+  /// Loads and returns the parsed `docProps/core.xml`, or `null` if missing.
+  XmlDocument? get corePropertiesXml =>
+      corePropertiesPartPath == null ? null : loadXml(corePropertiesPartPath!);
+
+  /// Loads and returns the parsed `docProps/custom.xml`, or `null` if missing.
+  XmlDocument? get customPropertiesXml => customPropertiesPartPath == null
+      ? null
+      : loadXml(customPropertiesPartPath!);
 
   /// Loads and returns the parsed main document XML.
   ///
@@ -685,6 +730,18 @@ class DocxPackage {
   String? _partFromDocumentRelType(String typeSuffix) {
     final docPart = mainDocumentPartPath;
     final rels = relationshipsForPart(docPart);
+    final rel = rels.firstWhereTypeSuffix(typeSuffix);
+    if (rel == null || rel.isExternal) return null;
+
+    final candidate = _canonicalPartPath(rel.resolvedTarget);
+    return hasPart(candidate) ? candidate : null;
+  }
+
+  /// Resolve a part path by looking up a relationship from the *package root*
+  /// (`_rels/.rels`). Used for docProps parts, which are linked from the root
+  /// rather than from the main document part.
+  String? _partFromRootRelType(String typeSuffix) {
+    final rels = relationshipsForPackageRoot();
     final rel = rels.firstWhereTypeSuffix(typeSuffix);
     if (rel == null || rel.isExternal) return null;
 

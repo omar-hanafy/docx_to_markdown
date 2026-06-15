@@ -14,6 +14,6 @@ With width 6cm:
 
 ![4testimg](rId9_1.jpg "fig:")
 
-[ref\_fig:testimg](#ref_fig:testimg)
+ref\_fig:testimg
 
-[ref\_fig:2testimg](#ref_fig:2testimg)
+ref\_fig:2testimg

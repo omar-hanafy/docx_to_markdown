@@ -38,6 +38,19 @@ enum StyleType {
   unknown,
 }
 
+/// Whether a paragraph style marks a definition-list term or definition body.
+///
+/// Used by [StyleRegistry.definitionRole] to detect Word/Pandoc definition
+/// lists, which use the paragraph styles named "Definition Term" and
+/// "Definition".
+enum DefinitionRole {
+  /// The style marks a definition term (the `<dt>`).
+  term,
+
+  /// The style marks a definition body (the `<dd>`).
+  definition,
+}
+
 StyleType _parseStyleType(String? raw) {
   switch ((raw ?? '').toLowerCase()) {
     case 'paragraph':
@@ -268,6 +281,9 @@ class StyleRegistry {
 
   final Map<String, StyleAnalysis> _analysisCache = <String, StyleAnalysis>{};
 
+  final Map<String, DefinitionRole?> _definitionRoleCache =
+      <String, DefinitionRole?>{};
+
   final Set<String> _codeStyleNamesNorm = <String>{};
   final Set<String> _codeStyleIdsNorm = <String>{};
   List<String> _extraMonospaceHints = <String>[];
@@ -277,6 +293,7 @@ class StyleRegistry {
     _stylesById.clear();
     _styleIdsByNameNorm.clear();
     _analysisCache.clear();
+    _definitionRoleCache.clear();
     _codeStyleNamesNorm.clear();
     _codeStyleIdsNorm.clear();
     _extraMonospaceHints = <String>[];
@@ -289,6 +306,7 @@ class StyleRegistry {
     _stylesById.clear();
     _styleIdsByNameNorm.clear();
     _analysisCache.clear();
+    _definitionRoleCache.clear();
 
     if (stylesXml == null) return;
 
@@ -495,6 +513,57 @@ class StyleRegistry {
 
     _analysisCache[styleId] = result;
     return result;
+  }
+
+  /// Returns the definition-list role of a paragraph [styleId], or null.
+  ///
+  /// Walks the `w:basedOn` chain (with cycle protection) and matches each
+  /// style's id or visible name. A name/id resolving to "Definition Term"
+  /// yields [DefinitionRole.term]; one resolving to "Definition" yields
+  /// [DefinitionRole.definition]. Term is checked first because the term name
+  /// contains the definition name.
+  ///
+  /// Why walk the chain: a custom styleId (e.g. "MyTerm") may inherit its
+  /// identity from a parent named "Definition Term"; resolving the chain
+  /// recovers that intent (style-name fallback). Never throws.
+  DefinitionRole? definitionRole(String? styleId) {
+    if (styleId == null || styleId.isEmpty) return null;
+
+    if (_definitionRoleCache.containsKey(styleId)) {
+      return _definitionRoleCache[styleId];
+    }
+
+    DefinitionRole? result;
+    final visited = <String>{};
+    StyleDefinition? current = _stylesById[styleId];
+    int depth = 0;
+    while (current != null && depth++ < _maxStyleChainDepth) {
+      if (!visited.add(current.id)) break;
+      final role = _definitionRoleFor(current.id, current.name);
+      if (role != null) {
+        result = role;
+        break;
+      }
+      if (current.basedOn == null) break;
+      current = _stylesById[current.basedOn!];
+    }
+
+    _definitionRoleCache[styleId] = result;
+    return result;
+  }
+
+  static DefinitionRole? _definitionRoleFor(String id, String? name) {
+    String collapse(String s) =>
+        s.trim().toLowerCase().replaceAll(RegExp(r'[\s_-]+'), '');
+    final idKey = collapse(id);
+    final nameKey = name == null ? '' : collapse(name);
+    if (idKey == 'definitionterm' || nameKey == 'definitionterm') {
+      return DefinitionRole.term;
+    }
+    if (idKey == 'definition' || nameKey == 'definition') {
+      return DefinitionRole.definition;
+    }
+    return null;
   }
 
   /// Whether a character style (referenced by `w:rStyle`) indicates inline code.

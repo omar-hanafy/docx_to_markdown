@@ -131,6 +131,7 @@ DocxToMarkdownConfig configFromJson(Map<String, dynamic> json) {
     'textColorMode',
     'pageBreakMode',
     'unknownElementPolicy',
+    'metadataMode',
     'extractImages',
     'includeFootnotes',
     'includeEndnotes',
@@ -195,6 +196,11 @@ DocxToMarkdownConfig configFromJson(Map<String, dynamic> json) {
       UnknownElementPolicy.values,
       'unknownElementPolicy',
       defaults.unknownElementPolicy,
+    ),
+    metadataMode: enumByName(
+      MetadataMode.values,
+      'metadataMode',
+      defaults.metadataMode,
     ),
     orderedListNumbering: enumByName(
       OrderedListNumbering.values,

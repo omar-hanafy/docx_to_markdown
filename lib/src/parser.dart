@@ -14,6 +14,7 @@ import 'package:xml/xml.dart';
 
 import 'package:docx_to_markdown/src/config.dart';
 import 'package:docx_to_markdown/src/ir.dart';
+import 'package:docx_to_markdown/src/metadata_parser.dart';
 import 'package:docx_to_markdown/src/ooxml_package.dart';
 import 'package:docx_to_markdown/src/styles.dart';
 
@@ -80,6 +81,7 @@ class DocxParser {
   final _NumberingModel _numbering;
   final _CommentIndex _comments;
   final List<DocWarning> _warnings = [];
+  Set<String> _bookmarkNames = const <String>{};
   Set<String> _targetedAnchors = const <String>{};
 
   /// Parses `word/document.xml` and its dependencies into a [Document].
@@ -94,6 +96,17 @@ class DocxParser {
   /// Throws [DocxPackageException] if critical parts are missing and
   /// [DocxToMarkdownConfig.strict] is `true`.
   Document parseMainDocument() {
+    // Metadata is independent of the body, so parse it first; every return path
+    // below carries it. In strict mode a malformed docProps part throws here.
+    final metadata = parseDocumentMetadata(
+      package,
+      strict: config.strict,
+      onWarning: (w) {
+        _warnings.add(w);
+        onWarning(w);
+      },
+    );
+
     final docXml = package.documentXml;
     if (docXml == null) {
       if (config.strict) {
@@ -107,7 +120,11 @@ class DocxParser {
         message: 'word/document.xml not found',
         location: 'word/document.xml',
       );
-      return Document(blocks: const [], warnings: List.of(_warnings));
+      return Document(
+        blocks: const [],
+        warnings: List.of(_warnings),
+        metadata: metadata,
+      );
     }
 
     final body = _firstDescendantByLocal(docXml, 'body');
@@ -123,10 +140,15 @@ class DocxParser {
         message: 'document.xml missing w:body',
         location: 'word/document.xml',
       );
-      return Document(blocks: const [], warnings: List.of(_warnings));
+      return Document(
+        blocks: const [],
+        warnings: List.of(_warnings),
+        metadata: metadata,
+      );
     }
 
     final mainCtx = _ParseContext(partPath: package.mainDocumentPartPath);
+    _bookmarkNames = _collectBookmarkNames(body);
     _targetedAnchors = _collectTargetedAnchors(body);
 
     // 1. Parse Headers
@@ -189,6 +211,7 @@ class DocxParser {
       blocks: hookedBlocks,
       footnotes: hookedFootnotes,
       warnings: List.of(_warnings),
+      metadata: metadata,
     );
   }
 
@@ -345,6 +368,27 @@ class DocxParser {
       ];
     }
 
+    // Definition lists. Paragraphs styled "Definition Term" / "Definition"
+    // (Pandoc reference styles) become definition-list tokens that the builder
+    // groups. Headings, quotes, code and explicit style overrides take
+    // precedence (handled above / guarded here); direct numbering wins so a
+    // genuinely numbered paragraph stays a list.
+    if (numPr == null && !isHeading && !isQuote) {
+      final defRole = styles.definitionRole(styleId);
+      if (defRole != null) {
+        final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
+        final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+        switch (defRole) {
+          case DefinitionRole.term:
+            return [_DefTermToken(inlines, meta: meta, loc: loc)];
+          case DefinitionRole.definition:
+            return [
+              _DefItemToken(ParagraphBlock(inlines, meta: meta), loc: loc),
+            ];
+        }
+      }
+    }
+
     // Check for direct numbering properties or style-inherited numbering
     String? effectiveNumId;
     int effectiveIlvl = 0;
@@ -379,6 +423,13 @@ class DocxParser {
       // begins - it must not trigger a per-item restart (see _addListItem).
       final start = levelInfo?.startOverride ?? levelInfo?.start;
       final numberFormat = levelInfo?.numberFormat ?? ListNumberFormat.decimal;
+      final meta = _paragraphMeta(
+        ctx: ctx,
+        loc: loc,
+        styleId: styleId,
+        numId: effectiveNumId,
+        ilvl: effectiveIlvl,
+      );
 
       final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
 
@@ -392,18 +443,21 @@ class DocxParser {
           numberFormat: numberFormat,
           checked: checked,
           markerIsBlank: markerIsBlank,
+          lvlText: levelInfo?.lvlText,
           loc: loc,
-          itemBlocks: [ParagraphBlock(inlines)],
+          itemBlocks: [ParagraphBlock(inlines, meta: meta)],
         ),
       ];
     }
+
+    final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
 
     if (isHeading && headingLevel > 0) {
       final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
       if (_isInlineListEffectivelyEmpty(inlines)) return const [];
       return [
         _BlockToken(
-          HeadingBlock(level: headingLevel, inlines: inlines),
+          HeadingBlock(level: headingLevel, inlines: inlines, meta: meta),
           loc: loc,
           canContinueList: false,
         ),
@@ -415,7 +469,7 @@ class DocxParser {
       if (_isInlineListEffectivelyEmpty(inlines)) return const [];
       return [
         _BlockToken(
-          QuoteBlock([ParagraphBlock(inlines)]),
+          QuoteBlock([ParagraphBlock(inlines, meta: meta)], meta: meta),
           loc: loc,
           canContinueList: false,
         ),
@@ -430,11 +484,34 @@ class DocxParser {
 
     return [
       _BlockToken(
-        ParagraphBlock(inlines),
+        ParagraphBlock(inlines, meta: meta),
         loc: loc,
         canContinueList: canContinueList,
       ),
     ];
+  }
+
+  NodeMeta _paragraphMeta({
+    required _ParseContext ctx,
+    required String loc,
+    String? styleId,
+    String? numId,
+    int? ilvl,
+  }) {
+    final attrs = <String, Object?>{};
+    if (styleId != null) {
+      attrs['styleId'] = styleId;
+      final styleName = styles.getById(styleId)?.name;
+      if (styleName != null && styleName.isNotEmpty) {
+        attrs['styleName'] = styleName;
+      }
+    }
+    if (numId != null) attrs['numId'] = numId;
+    if (ilvl != null) attrs['ilvl'] = ilvl;
+    return NodeMeta(
+      location: SourceLocation(part: ctx.partPath, path: loc),
+      attributes: attrs,
+    );
   }
 
   // ===========================================================================
@@ -470,6 +547,7 @@ class DocxParser {
   }) {
     final out = <Inline>[];
     final activeCommentIds = <String>{};
+    final emittedCommentIds = <String>{};
     final field = _FieldState();
 
     void processChildren(XmlElement node, String parentLoc) {
@@ -484,6 +562,7 @@ class DocxParser {
           out,
           field,
           activeCommentIds,
+          emittedCommentIds,
           processChildren,
           inheritedRunProps,
         );
@@ -506,6 +585,7 @@ class DocxParser {
     List<Inline> out,
     _FieldState field,
     Set<String> activeCommentIds,
+    Set<String> emittedCommentIds,
     void Function(XmlElement, String) recurse,
     StyleRunProperties? inheritedRunProps,
   ) {
@@ -523,6 +603,7 @@ class DocxParser {
           loc: cLoc,
           field: field,
           commentIds: activeCommentIds,
+          emittedCommentIds: emittedCommentIds,
           inheritedRunProps: inheritedRunProps,
         );
         if (field.isActive && field.inResult) {
@@ -592,15 +673,20 @@ class DocxParser {
       case 'commentRangeEnd':
         if (config.includeComments) {
           final id = _attrLocal(child, 'id');
-          if (id != null && activeCommentIds.remove(id)) {
-            final c = _comments.byId(id);
-            if (c != null) {
-              push(
-                HtmlInline(
-                  '^[${_escapeForComment(c.author)}: ${_escapeForComment(c.text)}]',
-                ),
-              );
-            }
+          if (id != null) {
+            activeCommentIds.remove(id);
+            final comment = _commentInlineForId(id, emittedCommentIds);
+            if (comment != null) push(comment);
+          }
+        }
+        break;
+
+      case 'commentReference':
+        if (config.includeComments) {
+          final id = _attrLocal(child, 'id');
+          if (id != null) {
+            final comment = _commentInlineForId(id, emittedCommentIds);
+            if (comment != null) push(comment);
           }
         }
         break;
@@ -667,8 +753,12 @@ class DocxParser {
   }
 
   void _finalizeField(List<Inline> out, _FieldState field, String loc) {
-    final result = field.finalizeTop(loc: loc);
+    final result = field.finalizeTop(loc: loc, refExists: _refTargetExists);
     if (result == null) return;
+    final unresolvedRef = result.unresolvedRef;
+    if (unresolvedRef != null) {
+      _warnUnresolvedRef(unresolvedRef, loc);
+    }
 
     final emitted = result.produced != null
         ? <Inline>[result.produced!]
@@ -685,12 +775,22 @@ class DocxParser {
     }
   }
 
+  HtmlInline? _commentInlineForId(String id, Set<String> emittedCommentIds) {
+    if (!emittedCommentIds.add(id)) return null;
+    final comment = _comments.byId(id);
+    if (comment == null) return null;
+    return HtmlInline(
+      '^[${_escapeForComment(comment.author)}: ${_escapeForComment(comment.text)}]',
+    );
+  }
+
   List<Inline> _parseRun(
     XmlElement r, {
     required _ParseContext ctx,
     required String loc,
     required _FieldState field,
     required Set<String> commentIds,
+    required Set<String> emittedCommentIds,
     required StyleRunProperties? inheritedRunProps,
   }) {
     final out = <Inline>[];
@@ -739,6 +839,17 @@ class DocxParser {
       }
     }
 
+    if (config.includeComments) {
+      final commentRef = _firstChildByLocal(r, 'commentReference');
+      if (commentRef != null) {
+        final id = _attrLocal(commentRef, 'id');
+        if (id != null) {
+          final comment = _commentInlineForId(id, emittedCommentIds);
+          if (comment != null) out.add(comment);
+        }
+      }
+    }
+
     final drawing = _firstChildByLocal(r, 'drawing');
     if (drawing != null) {
       final extracted = _parseDrawingAsInline(
@@ -755,20 +866,22 @@ class DocxParser {
       if (img != null) return [img];
     }
 
+    final rPr = _firstChildByLocal(r, 'rPr');
+    final runStyleId = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
+    final runMeta = _runMeta(ctx: ctx, loc: loc, styleId: runStyleId);
+    final runProps = _effectiveRunProperties(
+      rPr,
+      inheritedRunProps: inheritedRunProps,
+    );
+
     final sym = _firstChildByLocal(r, 'sym');
     if (sym != null) {
       final charHex = _attrLocal(sym, 'char');
       final decoded = _decodeHexChar(charHex);
       if (decoded != null) {
-        out.add(TextInline(decoded));
+        out.add(TextInline(decoded, meta: runMeta));
       }
     }
-
-    final rPr = _firstChildByLocal(r, 'rPr');
-    final runProps = _effectiveRunProperties(
-      rPr,
-      inheritedRunProps: inheritedRunProps,
-    );
 
     for (final child in r.children.whereType<XmlElement>()) {
       switch (child.name.local) {
@@ -776,19 +889,23 @@ class DocxParser {
           final text = child.innerText;
           if (text.isEmpty) break;
           out.add(
-            _applyRunFormatting(TextInline(text), rPr: rPr, props: runProps),
+            _applyRunFormatting(
+              TextInline(text, meta: runMeta),
+              rPr: rPr,
+              props: runProps,
+            ),
           );
           break;
         case 'tab':
         case 'ptab':
-          out.add(const TextInline('\t'));
+          out.add(TextInline('\t', meta: runMeta));
           break;
         case 'br':
         case 'cr':
           out.add(const LineBreakInline());
           break;
         case 'noBreakHyphen':
-          out.add(const TextInline('-'));
+          out.add(TextInline('-', meta: runMeta));
           break;
         default:
           break;
@@ -799,12 +916,33 @@ class DocxParser {
       final txt = r.findAllElements('w:t').map((e) => e.innerText).join();
       if (txt.isNotEmpty) {
         out.add(
-          _applyRunFormatting(TextInline(txt), rPr: rPr, props: runProps),
+          _applyRunFormatting(
+            TextInline(txt, meta: runMeta),
+            rPr: rPr,
+            props: runProps,
+          ),
         );
       }
     }
 
     return out;
+  }
+
+  NodeMeta? _runMeta({
+    required _ParseContext ctx,
+    required String loc,
+    String? styleId,
+  }) {
+    if (styleId == null) return null;
+    final attrs = <String, Object?>{'styleId': styleId};
+    final styleName = styles.getById(styleId)?.name;
+    if (styleName != null && styleName.isNotEmpty) {
+      attrs['styleName'] = styleName;
+    }
+    return NodeMeta(
+      location: SourceLocation(part: ctx.partPath, path: loc),
+      attributes: attrs,
+    );
   }
 
   Inline _applyRunFormatting(
@@ -823,9 +961,9 @@ class DocxParser {
     final isCode = _isCodeRun(rPr, props: props);
     if (isCode) {
       if (node case TextInline(:final text)) {
-        node = CodeInline(text);
+        node = CodeInline(text, meta: node.meta);
       } else {
-        node = HtmlInline(_inlineToPlainText(node));
+        node = HtmlInline(_inlineToPlainText(node), meta: node.meta);
       }
     }
 
@@ -835,13 +973,13 @@ class DocxParser {
     final underline = props?.underline == true;
     final vertAlign = props?.vertAlign;
 
-    if (underline) node = UnderlineInline([node]);
-    if (strike) node = StrikeInline([node]);
-    if (italic) node = EmphInline([node]);
-    if (bold) node = StrongInline([node]);
+    if (underline) node = UnderlineInline([node], meta: node.meta);
+    if (strike) node = StrikeInline([node], meta: node.meta);
+    if (italic) node = EmphInline([node], meta: node.meta);
+    if (bold) node = StrongInline([node], meta: node.meta);
 
-    if (vertAlign == 'subscript') node = SubInline([node]);
-    if (vertAlign == 'superscript') node = SupInline([node]);
+    if (vertAlign == 'subscript') node = SubInline([node], meta: node.meta);
+    if (vertAlign == 'superscript') node = SupInline([node], meta: node.meta);
 
     // Highlight (w:highlight) and text color (w:color) wrap the formatted run.
     // They are always parsed into the IR for fidelity; the renderer drops them
@@ -853,11 +991,11 @@ class DocxParser {
     if (!isCode) {
       final color = props?.color;
       if (color != null && color.isNotEmpty) {
-        node = ColorInline([node], color: color);
+        node = ColorInline([node], color: color, meta: node.meta);
       }
       final highlight = props?.highlight;
       if (highlight != null && highlight.isNotEmpty) {
-        node = HighlightInline([node], color: highlight);
+        node = HighlightInline([node], color: highlight, meta: node.meta);
       }
     }
 
@@ -1079,9 +1217,13 @@ class DocxParser {
         ];
       }
       if (ref != null) {
-        return [
-          LinkInline(url: '#$ref', children: [TextInline(ref)]),
-        ];
+        if (_refTargetExists(ref)) {
+          return [
+            LinkInline(url: '#$ref', children: [TextInline(ref)]),
+          ];
+        }
+        _warnUnresolvedRef(ref, loc);
+        return [TextInline(ref)];
       }
       return const [];
     }
@@ -1093,10 +1235,28 @@ class DocxParser {
       return [LinkInline(url: '#$anchor', children: children)];
     }
     if (ref != null) {
-      return [LinkInline(url: '#$ref', children: children)];
+      if (_refTargetExists(ref)) {
+        return [LinkInline(url: '#$ref', children: children)];
+      }
+      _warnUnresolvedRef(ref, loc);
+      return children;
     }
 
     return children;
+  }
+
+  bool _refTargetExists(String bookmarkName) {
+    return _bookmarkNames.contains(bookmarkName) &&
+        _isNavigableBookmark(bookmarkName);
+  }
+
+  void _warnUnresolvedRef(String bookmarkName, String loc) {
+    _warn(
+      code: 'fieldcode.unresolved',
+      message:
+          'Unresolved REF/PAGEREF field target "$bookmarkName"; kept display text.',
+      location: loc,
+    );
   }
 
   List<Inline>? _parseDrawingAsInline(
@@ -1811,13 +1971,16 @@ class DocxParser {
     final normalized = switch (block) {
       ParagraphBlock() => ParagraphBlock(
         _applyHooksToInlines(block.inlines, loc: '$loc:para'),
+        meta: block.meta,
       ),
       HeadingBlock() => HeadingBlock(
         level: block.level,
         inlines: _applyHooksToInlines(block.inlines, loc: '$loc:heading'),
+        meta: block.meta,
       ),
       QuoteBlock() => QuoteBlock(
         _applyHooksToBlocks(block.blocks, baseLoc: '$loc:quote'),
+        meta: block.meta,
       ),
       ListBlock() => ListBlock(
         ordered: block.ordered,
@@ -1832,9 +1995,26 @@ class DocxParser {
                   baseLoc: '$loc:listItem[$idx]',
                 ),
                 checked: it.checked,
+                meta: it.meta,
               ),
             )
             .toList(),
+        meta: block.meta,
+      ),
+      DefinitionListBlock() => DefinitionListBlock(
+        items: block.items
+            .mapIndexed(
+              (idx, it) => DefinitionListItem(
+                term: _applyHooksToInlines(it.term, loc: '$loc:defTerm[$idx]'),
+                definitions: _applyHooksToBlocks(
+                  it.definitions,
+                  baseLoc: '$loc:defItem[$idx]',
+                ),
+                meta: it.meta,
+              ),
+            )
+            .toList(),
+        meta: block.meta,
       ),
       TableBlock() => TableBlock(
         grid: TableGrid(
@@ -1851,6 +2031,7 @@ class DocxParser {
                           colSpan: cell.colSpan,
                           rowSpan: cell.rowSpan,
                           isHeader: cell.isHeader,
+                          meta: cell.meta,
                         ),
                       )
                       .toList(),
@@ -1860,12 +2041,13 @@ class DocxParser {
               .toList(),
         ),
         alignments: block.alignments,
+        meta: block.meta,
       ),
       _ => block,
     };
     final transformed = config.hooks.transformBlock?.call(
       normalized,
-      HookContext(location: loc),
+      _hookContextForNode(normalized, loc),
     );
     return transformed ?? normalized;
   }
@@ -1886,33 +2068,67 @@ class DocxParser {
     final normalized = switch (node) {
       StrongInline() => StrongInline(
         _applyHooksToInlines(node.children, loc: '$loc:strong'),
+        meta: node.meta,
       ),
       EmphInline() => EmphInline(
         _applyHooksToInlines(node.children, loc: '$loc:emph'),
+        meta: node.meta,
       ),
       StrikeInline() => StrikeInline(
         _applyHooksToInlines(node.children, loc: '$loc:strike'),
+        meta: node.meta,
       ),
       UnderlineInline() => UnderlineInline(
         _applyHooksToInlines(node.children, loc: '$loc:underline'),
+        meta: node.meta,
       ),
       LinkInline() => LinkInline(
         url: node.url,
         children: _applyHooksToInlines(node.children, loc: '$loc:link'),
+        title: node.title,
+        meta: node.meta,
       ),
       SupInline() => SupInline(
         _applyHooksToInlines(node.children, loc: '$loc:sup'),
+        meta: node.meta,
       ),
       SubInline() => SubInline(
         _applyHooksToInlines(node.children, loc: '$loc:sub'),
+        meta: node.meta,
+      ),
+      HighlightInline() => HighlightInline(
+        _applyHooksToInlines(node.children, loc: '$loc:highlight'),
+        color: node.color,
+        meta: node.meta,
+      ),
+      ColorInline() => ColorInline(
+        _applyHooksToInlines(node.children, loc: '$loc:color'),
+        color: node.color,
+        meta: node.meta,
       ),
       _ => node,
     };
     return config.hooks.transformInline?.call(
           normalized,
-          HookContext(location: loc),
+          _hookContextForNode(normalized, loc),
         ) ??
         normalized;
+  }
+
+  HookContext _hookContextForNode(DocNode node, String loc) {
+    final meta = node.meta;
+    final attrs = meta?.attributes ?? const <String, Object?>{};
+    final source = meta?.location;
+    final styleId = attrs['styleId'];
+    final ilvl = attrs['ilvl'];
+    return HookContext(
+      part: source?.part ?? '',
+      path: source?.path ?? loc,
+      styleId: styleId is String ? styleId : null,
+      listLevel: ilvl is int ? ilvl : null,
+      meta: attrs,
+      location: source?.toString() ?? loc,
+    );
   }
 
   void _warn({
@@ -2021,9 +2237,12 @@ class DocxParser {
     for (final i in inlines) {
       if (i is TextInline) {
         if (pending == null) {
-          pending = TextInline(i.text);
+          pending = i;
+        } else if (pending!.meta == i.meta) {
+          pending = TextInline('${pending!.text}${i.text}', meta: i.meta);
         } else {
-          pending = TextInline('${pending!.text}${i.text}');
+          flush();
+          pending = i;
         }
       } else {
         flush();
@@ -2080,6 +2299,18 @@ class DocxParser {
         case MathBlock():
           sb.write('<span class="math">${_escapeHtml(b.latexOrText)}</span>');
           break;
+        case DefinitionListBlock():
+          sb.write('<dl>');
+          for (final it in b.items) {
+            sb.write(
+              '<dt>${_escapeHtml(_inlineListToPlainText(it.term))}</dt>',
+            );
+            if (it.definitions.isNotEmpty) {
+              sb.write('<dd>${_renderBlocksAsHtml(it.definitions)}</dd>');
+            }
+          }
+          sb.write('</dl>');
+          break;
         default:
           break;
       }
@@ -2115,6 +2346,16 @@ class DocxParser {
     return anchors;
   }
 
+  Set<String> _collectBookmarkNames(XmlElement body) {
+    final names = <String>{};
+    for (final el in body.descendants.whereType<XmlElement>()) {
+      if (el.name.local != 'bookmarkStart') continue;
+      final name = _attrLocal(el, 'name');
+      if (name != null && name.isNotEmpty) names.add(name);
+    }
+    return names;
+  }
+
   void _collectAnchorsFromInstr(String? instr, Set<String> anchors) {
     if (instr == null || instr.isEmpty) return;
     final hyperlinkAnchor = _extractHyperlinkAnchor(instr);
@@ -2148,6 +2389,7 @@ class _ListItemToken extends _Token {
     this.numberFormat = ListNumberFormat.decimal,
     this.checked,
     this.markerIsBlank = false,
+    this.lvlText,
     required this.itemBlocks,
     required this.loc,
   });
@@ -2163,6 +2405,7 @@ class _ListItemToken extends _Token {
   final ListNumberFormat numberFormat;
   final bool? checked;
   final bool markerIsBlank;
+  final String? lvlText;
   final List<Block> itemBlocks;
   final String loc;
 }
@@ -2184,6 +2427,21 @@ class _AnchorToken extends _Token {
   _AnchorToken(this.html, {required this.name, required this.loc});
   final String name;
   final String html;
+  final String loc;
+}
+
+/// A "Definition Term" paragraph: opens a new [DefinitionListItem].
+class _DefTermToken extends _Token {
+  _DefTermToken(this.term, {required this.meta, required this.loc});
+  final List<Inline> term;
+  final NodeMeta? meta;
+  final String loc;
+}
+
+/// A "Definition" paragraph: a block of the current term's definition body.
+class _DefItemToken extends _Token {
+  _DefItemToken(this.block, {required this.loc});
+  final Block block;
   final String loc;
 }
 
@@ -2211,12 +2469,14 @@ final class _BList implements _BNode {
     required this.start,
     required this.numberFormat,
     required this.tightness,
+    this.meta,
   });
 
   bool ordered;
   int start;
   ListNumberFormat numberFormat;
   ListTightness tightness;
+  NodeMeta? meta;
 
   final List<_BListItem> items = [];
 
@@ -2228,6 +2488,7 @@ final class _BList implements _BNode {
       numberFormat: numberFormat,
       tightness: tightness,
       items: items.map((it) => it.toListItem()).toList(growable: false),
+      meta: meta,
     );
   }
 }
@@ -2252,6 +2513,26 @@ final class _BListEntry {
   _BListEntry({required this.list, required this.numId});
   final _BList list;
   final String numId;
+}
+
+/// Accumulates definition-list items (term + body blocks) until flushed.
+final class _BDefList implements _BNode {
+  final List<_BDefItem> items = [];
+
+  @override
+  Block toBlock() => DefinitionListBlock(
+    items: items.map((it) => it.toItem()).toList(growable: false),
+  );
+}
+
+final class _BDefItem {
+  _BDefItem({required this.term, this.meta});
+  final List<Inline> term;
+  final NodeMeta? meta;
+  final List<Block> definitions = [];
+
+  DefinitionListItem toItem() =>
+      DefinitionListItem(term: term, definitions: definitions, meta: meta);
 }
 
 final class _CodeAccumulator {
@@ -2281,6 +2562,7 @@ class _TokenBuilder {
   final List<_BListEntry> _listStack = [];
   final List<_PendingAnchor> _pendingAnchors = [];
   _CodeAccumulator? _code;
+  _BDefList? _defList;
 
   List<Block> get outputBlocks =>
       _top.map((n) => n.toBlock()).toList(growable: false);
@@ -2293,6 +2575,7 @@ class _TokenBuilder {
 
   void finish() {
     _flushCode();
+    _flushDefList();
     _closeAllLists();
     _flushPendingAnchorsTo(_top);
   }
@@ -2301,14 +2584,28 @@ class _TokenBuilder {
     switch (t) {
       case _ListItemToken():
         _flushCode();
+        _flushDefList();
         _addListItem(t);
         return;
       case _CodeLineToken():
+        _flushDefList();
         _handleCodeLine(t);
         return;
       case _AnchorToken():
         _flushCode();
+        _flushDefList();
         _pendingAnchors.add((name: t.name, html: t.html));
+        return;
+      case _DefTermToken():
+        _flushCode();
+        _closeAllLists();
+        _flushPendingAnchorsTo(_top);
+        _startDefTerm(t);
+        return;
+      case _DefItemToken():
+        _flushCode();
+        _closeAllLists();
+        _addDefItem(t);
         return;
       case _BlockToken():
         if (_listStack.isNotEmpty && t.canContinueList) {
@@ -2317,11 +2614,47 @@ class _TokenBuilder {
           return;
         }
         _flushCode();
+        _flushDefList();
         _closeAllLists();
         _flushPendingAnchorsTo(_top, beforeBlock: t.block);
         _top.add(_BLeaf(t.block));
         return;
     }
+  }
+
+  /// Opens a new definition-list item for [t]'s term, creating the list if
+  /// needed. Consecutive terms each start their own item; the definition body
+  /// is attached by following [_DefItemToken]s.
+  void _startDefTerm(_DefTermToken t) {
+    (_defList ??= _BDefList()).items.add(_BDefItem(term: t.term, meta: t.meta));
+  }
+
+  /// Adds a definition body block to the current term. An orphan definition
+  /// (no preceding term) degrades to a normal block so no text is lost, and a
+  /// warning is emitted.
+  void _addDefItem(_DefItemToken t) {
+    final dl = _defList;
+    if (dl == null || dl.items.isEmpty) {
+      warn(
+        code: 'definitionList.orphanDefinition',
+        message:
+            'Definition paragraph has no preceding term; '
+            'rendered as a normal paragraph.',
+        location: t.loc,
+      );
+      _flushPendingAnchorsTo(_top, beforeBlock: t.block);
+      _top.add(_BLeaf(t.block));
+      return;
+    }
+    dl.items.last.definitions.add(t.block);
+  }
+
+  void _flushDefList() {
+    final dl = _defList;
+    if (dl == null) return;
+    _defList = null;
+    if (dl.items.isEmpty) return;
+    _top.add(dl);
   }
 
   void _handleCodeLine(_CodeLineToken t) {
@@ -2371,9 +2704,8 @@ class _TokenBuilder {
     }
 
     if (t.markerIsBlank &&
-        t.checked == null &&
         _listStack.length == level + 1 &&
-        _currentListItemIsTask()) {
+        _currentListHasItem()) {
       _addBlocksToCurrentListItem(t.itemBlocks);
       return;
     }
@@ -2403,6 +2735,7 @@ class _TokenBuilder {
         start: start,
         numberFormat: numberFormat,
         tightness: ListTightness.auto,
+        meta: atItemLevel ? _listMetaForToken(t, level) : null,
       );
 
       if (_listStack.isEmpty) {
@@ -2422,11 +2755,17 @@ class _TokenBuilder {
     _listStack.last.list.items.add(item);
   }
 
-  bool _currentListItemIsTask() {
+  NodeMeta _listMetaForToken(_ListItemToken token, int level) {
+    final attrs = <String, Object?>{'numId': token.numId, 'ilvl': level};
+    final lvlText = token.lvlText;
+    if (lvlText != null) attrs['lvlText'] = lvlText;
+    return NodeMeta(attributes: attrs);
+  }
+
+  bool _currentListHasItem() {
     if (_listStack.isEmpty) return false;
     final items = _listStack.last.list.items;
-    if (items.isEmpty) return false;
-    return items.last.checked != null;
+    return items.isNotEmpty;
   }
 
   void _addBlockToCurrentListItem(Block block) {
@@ -2797,17 +3136,58 @@ class _CommentIndex {
               .firstWhereOrNull((a) => a.name.local == 'author')
               ?.value ??
           'Unknown';
-      final text = c.descendants
-          .whereType<XmlElement>()
-          .where((e) => e.name.local == 't')
-          .map((e) => e.innerText)
-          .join();
+      final text = _commentBodyText(c);
       map[id] = _CommentData(author: author, text: text.trim());
     }
     return _CommentIndex(map);
   }
 
   _CommentData? byId(String id) => _byId[id];
+
+  static String _commentBodyText(XmlElement comment) {
+    final paragraphs = comment.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'p')
+        .toList();
+    if (paragraphs.isEmpty) return _commentTextFromContainer(comment).trim();
+
+    return paragraphs
+        .map((p) => _commentTextFromContainer(p).trim())
+        .where((text) => text.isNotEmpty)
+        .join('\n');
+  }
+
+  static String _commentTextFromContainer(XmlElement container) {
+    final buffer = StringBuffer();
+
+    void walk(XmlNode node) {
+      if (node is! XmlElement) return;
+      switch (node.name.local) {
+        case 't':
+        case 'delText':
+          buffer.write(node.innerText);
+          return;
+        case 'tab':
+        case 'ptab':
+          buffer.write('\t');
+          return;
+        case 'br':
+        case 'cr':
+          buffer.write('\n');
+          return;
+        case 'annotationRef':
+        case 'commentReference':
+          return;
+        default:
+          for (final child in node.children) {
+            walk(child);
+          }
+      }
+    }
+
+    walk(container);
+    return buffer.toString();
+  }
 }
 
 class _CommentData {
@@ -2894,7 +3274,10 @@ class _FieldState {
     _stack.last.instr.write(t);
   }
 
-  _FieldResult? finalizeTop({required String loc}) {
+  _FieldResult? finalizeTop({
+    required String loc,
+    required bool Function(String bookmarkName) refExists,
+  }) {
     if (!isActive) return null;
     final entry = _stack.removeLast();
     final s = entry.instr.toString();
@@ -2902,6 +3285,7 @@ class _FieldState {
     final anchor = _extractHyperlinkAnchor(s);
 
     Inline? produced;
+    String? unresolvedRef;
     if (url != null) {
       final children = entry.displayInlines.isEmpty
           ? [TextInline(url)]
@@ -2918,13 +3302,18 @@ class _FieldState {
         final children = entry.displayInlines.isEmpty
             ? [TextInline(ref)]
             : entry.displayInlines;
-        produced = LinkInline(url: '#$ref', children: children);
+        if (refExists(ref)) {
+          produced = LinkInline(url: '#$ref', children: children);
+        } else {
+          unresolvedRef = ref;
+        }
       }
     }
 
     return _FieldResult(
       produced: produced,
       displayInlines: entry.displayInlines,
+      unresolvedRef: unresolvedRef,
     );
   }
 }
@@ -2937,9 +3326,14 @@ class _FieldEntry {
 }
 
 class _FieldResult {
-  _FieldResult({required this.produced, required this.displayInlines});
+  _FieldResult({
+    required this.produced,
+    required this.displayInlines,
+    required this.unresolvedRef,
+  });
   final Inline? produced;
   final List<Inline> displayInlines;
+  final String? unresolvedRef;
 }
 
 // ============================================================================

@@ -35,6 +35,37 @@ Future<Document> parseDocument(
 }
 
 void main() {
+  group('DocxParser metadata', () {
+    test('parseMainDocument attaches parsed document metadata', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Body')),
+        coreXml:
+            '<cp:coreProperties '
+            'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:title>Doc</dc:title><dc:creator>Jane</dc:creator>'
+            '</cp:coreProperties>',
+        customXml:
+            '<Properties '
+            'xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" '
+            'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            '<property fmtid="{x}" pid="2" name="Team">'
+            '<vt:lpwstr>Platform</vt:lpwstr></property></Properties>',
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.metadata.title, 'Doc');
+      expect(doc.metadata.creator, 'Jane');
+      expect(doc.metadata.custom['Team'], 'Platform');
+    });
+
+    test('document without docProps has empty metadata', () async {
+      final doc = await parseDocument(
+        buildDocxBytes(documentXml: docXmlWithBody(wP(text: 'Body'))),
+      );
+      expect(doc.metadata.isEmpty, isTrue);
+    });
+  });
+
   group('DocxConverter input validation', () {
     test('empty bytes throws DocxPackageException', () async {
       final converter = DocxConverter(Uint8List(0));
@@ -255,6 +286,50 @@ void main() {
 
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '- [ ] Todo\n- [x] Done\n  Details');
+    });
+
+    test('blank list marker continues the current list item', () async {
+      const numbering =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val=" "/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Parent'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 1,
+          innerXml: wR(text: 'Child'),
+        ),
+        wP(
+          numId: '2',
+          ilvl: 1,
+          innerXml: wR(text: 'Continuation'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numbering,
+      );
+
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(tightLists: false),
+      ).convert();
+
+      expect(markdown.trimRight(), '- Parent\n  * Child\n    Continuation');
     });
 
     test('continues list item when paragraph is indented', () async {
@@ -794,42 +869,69 @@ void main() {
     });
 
     test('parses REF cross-reference field as anchor link', () async {
-      final body = wP(
-        innerXml: [
-          '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
-          '<w:r><w:instrText xml:space="preserve">REF _Ref12345 \\h</w:instrText></w:r>',
-          '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
-          '<w:r><w:t>See section</w:t></w:r>',
-          '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
-        ].join(),
-      );
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref12345"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>'
+          '${wP(innerXml: ['<w:r><w:fldChar w:fldCharType="begin"/></w:r>', '<w:r><w:instrText xml:space="preserve">REF _Ref12345 \\h</w:instrText></w:r>', '<w:r><w:fldChar w:fldCharType="separate"/></w:r>', '<w:r><w:t>See section</w:t></w:r>', '<w:r><w:fldChar w:fldCharType="end"/></w:r>'].join())}';
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
       final markdown = await DocxConverter(bytes).convert();
-      expect(markdown.trim(), '[See section](#_Ref12345)');
+      expect(markdown, contains('[See section](#_Ref12345)'));
     });
 
     test('parses fldSimple REF as anchor link', () async {
-      final body = wP(
-        innerXml: wFldSimple(
-          instr: 'REF _Ref99 \\h',
-          innerXml: wR(text: 'X'),
-        ),
-      );
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref99"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>'
+          '${wP(
+            innerXml: wFldSimple(
+              instr: 'REF _Ref99 \\h',
+              innerXml: wR(text: 'X'),
+            ),
+          )}';
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
       final markdown = await DocxConverter(bytes).convert();
-      expect(markdown.trim(), '[X](#_Ref99)');
+      expect(markdown, contains('[X](#_Ref99)'));
     });
 
     test('parses fldSimple PAGEREF as anchor link', () async {
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref77"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>'
+          '${wP(
+            innerXml: wFldSimple(
+              instr: 'PAGEREF _Ref77 \\h',
+              innerXml: wR(text: '7'),
+            ),
+          )}';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, contains('[7](#_Ref77)'));
+    });
+
+    test('unresolved REF field preserves display text and warns', () async {
       final body = wP(
         innerXml: wFldSimple(
-          instr: 'PAGEREF _Ref77 \\h',
-          innerXml: wR(text: '7'),
+          instr: 'REF MissingBookmark \\h',
+          innerXml: wR(text: 'See target'),
         ),
       );
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.single, isA<ParagraphBlock>());
+      final para = doc.blocks.single as ParagraphBlock;
+      expect(para.inlines.toPlainText(), 'See target');
+      expect(
+        doc.warnings,
+        contains(
+          isA<DocWarning>().having(
+            (warning) => warning.code,
+            'code',
+            'fieldcode.unresolved',
+          ),
+        ),
+      );
       final markdown = await DocxConverter(bytes).convert();
-      expect(markdown.trim(), '[7](#_Ref77)');
+      expect(markdown.trim(), 'See target');
     });
 
     test('PAGE field falls back to display text', () async {
@@ -918,7 +1020,7 @@ void main() {
 
         expect(
           markdown.trim(),
-          '[Jump](#refs)\n\n- one\n- two\n- <a id="refs"></a>three',
+          '[Jump](#refs)\n\n- one\n  two\n- <a id="refs"></a>three',
         );
       },
     );
@@ -989,6 +1091,71 @@ void main() {
         config: DocxToMarkdownConfig(includeComments: true),
       ).convert();
       expect(markdown.contains('^[Alice: Note]'), isTrue);
+    });
+
+    test('emits comments whose ranges cross paragraph boundaries', () async {
+      final body = [
+        wP(
+          innerXml:
+              '${wR(text: "Start ")}'
+              '<w:commentRangeStart w:id="1"/>'
+              '${wR(text: "first paragraph")}',
+        ),
+        wP(
+          innerXml:
+              '${wR(text: "second")}'
+              '<w:commentRangeEnd w:id="1"/>'
+              '<w:r><w:commentReference w:id="1"/></w:r>'
+              '${wR(text: " paragraph")}',
+        ),
+      ].join();
+      final comments =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="1" w:author="Alice">
+    <w:p><w:r><w:t>Across paragraphs</w:t></w:r></w:p>
+  </w:comment>
+</w:comments>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        commentsXml: comments,
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(includeComments: true),
+      ).convert();
+      expect(
+        RegExp(r'\^\[Alice: Across paragraphs\]').allMatches(markdown),
+        hasLength(1),
+      );
+      expect(markdown, contains('second^[Alice: Across paragraphs] paragraph'));
+    });
+
+    test('preserves breaks in emitted comment text', () async {
+      final body =
+          '${wR(text: "Text")}'
+          '<w:r><w:commentReference w:id="1"/></w:r>';
+      final comments =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="1" w:author="Alice">
+    <w:p>
+      <w:r><w:t>First line.</w:t></w:r>
+      <w:r><w:br/></w:r>
+      <w:r><w:t>Second line.</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(innerXml: body)),
+        commentsXml: comments,
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(includeComments: true),
+      ).convert();
+      expect(markdown, contains('^[Alice: First line. Second line.]'));
+      expect(markdown, isNot(contains('First line.Second line.')));
     });
 
     test('unknown element policy keepHtml emits comment', () async {
@@ -1206,6 +1373,48 @@ void main() {
       ).convert();
       expect(markdown.trim(), 'a. A\nb. B');
     });
+
+    test(
+      'preserveFormat renders parenthesized source marker template',
+      () async {
+        const numbering =
+            '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/>
+      <w:numFmt w:val="lowerLetter"/>
+      <w:lvlText w:val="(%1)"/>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>''';
+        final body = [
+          wP(
+            numId: '1',
+            ilvl: 0,
+            innerXml: wR(text: 'Alpha'),
+          ),
+          wP(
+            numId: '1',
+            ilvl: 0,
+            innerXml: wR(text: 'Beta'),
+          ),
+        ].join();
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          numberingXml: numbering,
+        );
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(
+            orderedListMarker: OrderedListMarker.preserveFormat,
+            orderedListNumbering: OrderedListNumbering.keep,
+          ),
+        ).convert();
+        expect(markdown.trim(), '(a) Alpha\n(b) Beta');
+      },
+    );
 
     test('default marker stays decimal for an upper roman source', () async {
       final body = [
@@ -1780,6 +1989,87 @@ void main() {
       );
       final markdown = await DocxConverter(bytes, config: config).convert();
       expect(markdown.trim(), 'X');
+    });
+
+    test('hooks receive paragraph style and list metadata', () async {
+      final contexts = <HookContext>[];
+      final metas = <NodeMeta?>[];
+      final body = wP(
+        text: 'Styled list item',
+        styleId: 'Bibliography',
+        numId: '1',
+        ilvl: 0,
+      );
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Bibliography">
+    <w:name w:val="Bibliography"/>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: styles,
+        numberingXml: numberingXml(numId: '1', numFmt: 'bullet', start: null),
+      );
+      final config = DocxToMarkdownConfig(
+        hooks: DocxToMarkdownHooks(
+          transformBlock: (block, ctx) {
+            if (block is ParagraphBlock) {
+              contexts.add(ctx);
+              metas.add(block.meta);
+            }
+            return block;
+          },
+        ),
+      );
+
+      await DocxConverter(bytes, config: config).convert();
+
+      expect(contexts.single.styleId, 'Bibliography');
+      expect(contexts.single.listLevel, 0);
+      expect(contexts.single.meta['numId'], '1');
+      expect(metas.single?.attributes['styleId'], 'Bibliography');
+      expect(metas.single?.attributes['styleName'], 'Bibliography');
+      expect(metas.single?.attributes['numId'], '1');
+      expect(metas.single?.attributes['ilvl'], 0);
+    });
+
+    test('inline hooks receive character style metadata', () async {
+      final contexts = <HookContext>[];
+      final metas = <NodeMeta?>[];
+      final body = wP(
+        innerXml:
+            '<w:r><w:rPr><w:rStyle w:val="MyStyle"/></w:rPr>'
+            '<w:t>Styled span</w:t></w:r>',
+      );
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="character" w:styleId="MyStyle" w:customStyle="1">
+    <w:name w:val="My Style"/>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: styles,
+      );
+      final config = DocxToMarkdownConfig(
+        hooks: DocxToMarkdownHooks(
+          transformInline: (inlineNode, ctx) {
+            if (inlineNode is TextInline) {
+              contexts.add(ctx);
+              metas.add(inlineNode.meta);
+            }
+            return inlineNode;
+          },
+        ),
+      );
+
+      await DocxConverter(bytes, config: config).convert();
+
+      expect(contexts.single.styleId, 'MyStyle');
+      expect(contexts.single.meta['styleName'], 'My Style');
+      expect(metas.single?.attributes['styleId'], 'MyStyle');
+      expect(metas.single?.attributes['styleName'], 'My Style');
     });
 
     test('onWarning hook is invoked', () async {

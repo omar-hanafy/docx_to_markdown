@@ -216,6 +216,56 @@ void main() {
       expect(File(filePath).existsSync(), isTrue);
     });
 
+    test('resolves core/custom property parts via root rels', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Hi')),
+        coreXml:
+            '<cp:coreProperties '
+            'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:title>Hello</dc:title></cp:coreProperties>',
+        customXml:
+            '<Properties '
+            'xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties">'
+            '</Properties>',
+      );
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      expect(pkg.corePropertiesPartPath, 'docProps/core.xml');
+      expect(pkg.customPropertiesPartPath, 'docProps/custom.xml');
+      expect(pkg.corePropertiesXml, isNotNull);
+      expect(pkg.customPropertiesXml, isNotNull);
+      expect(pkg.corePropertiesXml!.toXmlString(), contains('Hello'));
+    });
+
+    test('falls back to conventional docProps path without a rel', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Hi')),
+        extraXmlParts: {
+          'docProps/core.xml':
+              '<cp:coreProperties '
+              'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"/>',
+        },
+      );
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      expect(pkg.corePropertiesPartPath, 'docProps/core.xml');
+      expect(pkg.customPropertiesPartPath, isNull);
+    });
+
+    test('core/custom property parts are null when absent', () async {
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(wP(text: 'Hi')));
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      expect(pkg.corePropertiesPartPath, isNull);
+      expect(pkg.customPropertiesPartPath, isNull);
+      expect(pkg.corePropertiesXml, isNull);
+      expect(pkg.customPropertiesXml, isNull);
+    });
+
     test('canonicalizes part paths to posix style', () async {
       final bytes = buildDocxBytes(
         documentXml: docXmlWithBody(wP(text: 'Hello')),

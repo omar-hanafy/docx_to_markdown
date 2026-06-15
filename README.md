@@ -98,6 +98,48 @@ final hooks = DocxToMarkdownHooks(
 final config = DocxToMarkdownConfig(hooks: hooks);
 ```
 
+### Document Metadata
+
+The converter always parses document properties (`docProps/core.xml` and
+`docProps/custom.xml`) into `Document.metadata`. By default nothing is rendered,
+so Markdown output is unchanged. Set `metadataMode` to emit a Pandoc-style YAML
+front matter block before the body:
+
+```dart
+final config = DocxToMarkdownConfig(
+  metadataMode: MetadataMode.yamlFrontMatter,
+);
+final markdown = await DocxConverter(bytes, config: config).convert();
+```
+
+```yaml
+---
+title: Testing custom properties
+author: A. M.
+subject: This is the subject
+description: |-
+  Long description spanning several lines.
+  This is a second line.
+keywords:
+  - keyword 1
+  - keyword 2
+lang: en-US
+category: My Category
+created: "2025-08-04T18:53:49Z"
+modified: "2025-08-04T18:53:49Z"
+custom:
+  Company: My Company
+  subtitle: This is a subtitle
+---
+```
+
+Core properties map to Pandoc-friendly keys (`creator` becomes `author`,
+`language` becomes `lang`); `keywords` is split into a list, and custom
+properties are nested under `custom`. Front matter is emitted only when metadata
+is present, scalars are quoted when needed, and multiline values use YAML block
+scalars. Producer statistics from `docProps/app.xml` (page/word counts) are
+intentionally excluded.
+
 ## Supported Elements
 
 | Word Element | Markdown Output          | Notes                                             |
@@ -112,6 +154,7 @@ final config = DocxToMarkdownConfig(hooks: hooks);
 | Code         | `` `code` ``             | Detected by font (e.g., Consolas) or style name.  |
 | Blockquotes  | `> text`                 | Mapped from styles containing "Quote".            |
 | Footnotes    | `[^1]: ...`              | GFM syntax.                                       |
+| Metadata     | YAML front matter        | Opt-in via `MetadataMode.yamlFrontMatter`.        |
 
 ## Philosophy
 

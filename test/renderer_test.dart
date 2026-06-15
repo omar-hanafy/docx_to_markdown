@@ -3,6 +3,79 @@ import 'package:docx_to_markdown/src/markdown_renderer.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('MarkdownRenderer metadata front matter', () {
+    Document docWith(DocumentMetadata meta) => Document(
+      blocks: [
+        ParagraphBlock([const TextInline('Body text')]),
+      ],
+      metadata: meta,
+    );
+
+    final richMeta = DocumentMetadata(
+      title: 'My Title',
+      creator: 'A. M.',
+      description: 'Line one.\nLine two.',
+      keywords: const ['k1', 'k2'],
+      custom: const {'Company': 'ACME'},
+    );
+
+    test('metadataMode none renders no front matter', () {
+      final md = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(docWith(richMeta));
+      expect(md, 'Body text');
+      expect(md, isNot(contains('---')));
+      expect(md, isNot(contains('title:')));
+    });
+
+    test('metadataMode yamlFrontMatter renders front matter before body', () {
+      final md = MarkdownRenderer(
+        config: DocxToMarkdownConfig(
+          metadataMode: MetadataMode.yamlFrontMatter,
+        ),
+      ).render(docWith(richMeta));
+      expect(md, '''
+---
+title: My Title
+author: A. M.
+description: |-
+  Line one.
+  Line two.
+keywords:
+  - k1
+  - k2
+custom:
+  Company: ACME
+---
+
+Body text''');
+    });
+
+    test('no front matter is emitted for empty metadata', () {
+      final md = MarkdownRenderer(
+        config: DocxToMarkdownConfig(
+          metadataMode: MetadataMode.yamlFrontMatter,
+        ),
+      ).render(docWith(DocumentMetadata.empty));
+      expect(md, 'Body text');
+    });
+
+    test('front matter renders even with an empty body', () {
+      final md =
+          MarkdownRenderer(
+            config: DocxToMarkdownConfig(
+              metadataMode: MetadataMode.yamlFrontMatter,
+            ),
+          ).render(
+            Document(
+              blocks: const [],
+              metadata: DocumentMetadata(title: 'T'),
+            ),
+          );
+      expect(md, '---\ntitle: T\n---');
+    });
+  });
+
   group('MarkdownRenderer', () {
     test('renders headings with clamped level and line breaks', () {
       final doc = Document(

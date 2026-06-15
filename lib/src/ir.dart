@@ -294,6 +294,193 @@ sealed class Inline extends DocNode {
 // Document root + Notes
 // ---------------------------------------------------------------------------
 
+/// Structured document metadata parsed from `docProps/core.xml` and
+/// `docProps/custom.xml`.
+///
+/// [DocumentMetadata] is a pure, immutable value type with deep value
+/// semantics. All string fields are `null` when absent (an empty OOXML element
+/// such as `<dc:title/>` is treated as absent, not as an empty string).
+///
+/// ### Field mapping
+///
+/// Core properties map to first-class fields; [creator] is Dublin Core's
+/// author. [keywords] is split from the comma/semicolon separated
+/// `cp:keywords`. Recognized-but-uncommon core elements are preserved in
+/// [extra] keyed by their local element name. Custom properties from
+/// `docProps/custom.xml` are kept in [custom] as name -> string value.
+///
+/// Producer statistics from `docProps/app.xml` (page/word counts) are
+/// intentionally excluded; they are frequently stale.
+///
+/// See also:
+/// - [Document.metadata] where this is attached
+/// - [MetadataMode] for how it is optionally rendered as YAML front matter
+@immutable
+final class DocumentMetadata {
+  /// Creates document metadata. All fields are optional; the no-argument form
+  /// produces [empty].
+  ///
+  /// [keywords], [custom], and [extra] are defensively copied into
+  /// unmodifiable views.
+  DocumentMetadata({
+    this.title,
+    this.creator,
+    this.subject,
+    this.description,
+    List<String> keywords = const [],
+    this.language,
+    this.category,
+    this.created,
+    this.modified,
+    this.lastModifiedBy,
+    this.revision,
+    Map<String, String> custom = const {},
+    Map<String, String> extra = const {},
+  }) : keywords = List.unmodifiable(keywords),
+       custom = Map.unmodifiable(custom),
+       extra = Map.unmodifiable(extra);
+
+  /// A canonical empty metadata instance (no fields set).
+  static final DocumentMetadata empty = DocumentMetadata();
+
+  /// `dc:title` - the document title.
+  final String? title;
+
+  /// `dc:creator` - the author. Rendered as Pandoc's `author` key.
+  final String? creator;
+
+  /// `dc:subject` - the document subject.
+  final String? subject;
+
+  /// `dc:description` - free-form description; may span multiple lines.
+  final String? description;
+
+  /// `cp:keywords` split into individual keywords (comma or semicolon
+  /// separated in the source).
+  final List<String> keywords;
+
+  /// `dc:language` - the document language. Rendered as Pandoc's `lang` key.
+  final String? language;
+
+  /// `cp:category` - the document category.
+  final String? category;
+
+  /// `dcterms:created` - creation timestamp, kept verbatim as a string.
+  final String? created;
+
+  /// `dcterms:modified` - last-modified timestamp, kept verbatim as a string.
+  final String? modified;
+
+  /// `cp:lastModifiedBy` - the last author to modify the document, if present.
+  final String? lastModifiedBy;
+
+  /// `cp:revision` - the revision number, if present.
+  final String? revision;
+
+  /// Custom properties from `docProps/custom.xml` as name -> string value.
+  ///
+  /// Values are the text of each property's first `vt:*` child (decoded), so a
+  /// `<vt:lpwstr/>` yields an empty string.
+  final Map<String, String> custom;
+
+  /// Recognized core properties without a first-class field, keyed by the
+  /// element's local name (e.g. `contentStatus`). Preserved so robust metadata
+  /// is never silently dropped.
+  final Map<String, String> extra;
+
+  /// Whether no metadata at all is present.
+  bool get isEmpty =>
+      title == null &&
+      creator == null &&
+      subject == null &&
+      description == null &&
+      keywords.isEmpty &&
+      language == null &&
+      category == null &&
+      created == null &&
+      modified == null &&
+      lastModifiedBy == null &&
+      revision == null &&
+      custom.isEmpty &&
+      extra.isEmpty;
+
+  /// Whether any metadata field is present.
+  bool get isNotEmpty => !isEmpty;
+
+  /// Creates a copy with the given fields replaced.
+  DocumentMetadata copyWith({
+    String? title,
+    String? creator,
+    String? subject,
+    String? description,
+    List<String>? keywords,
+    String? language,
+    String? category,
+    String? created,
+    String? modified,
+    String? lastModifiedBy,
+    String? revision,
+    Map<String, String>? custom,
+    Map<String, String>? extra,
+  }) {
+    return DocumentMetadata(
+      title: title ?? this.title,
+      creator: creator ?? this.creator,
+      subject: subject ?? this.subject,
+      description: description ?? this.description,
+      keywords: keywords ?? this.keywords,
+      language: language ?? this.language,
+      category: category ?? this.category,
+      created: created ?? this.created,
+      modified: modified ?? this.modified,
+      lastModifiedBy: lastModifiedBy ?? this.lastModifiedBy,
+      revision: revision ?? this.revision,
+      custom: custom ?? this.custom,
+      extra: extra ?? this.extra,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is DocumentMetadata &&
+          other.title == title &&
+          other.creator == creator &&
+          other.subject == subject &&
+          other.description == description &&
+          _deepEquals(other.keywords, keywords) &&
+          other.language == language &&
+          other.category == category &&
+          other.created == created &&
+          other.modified == modified &&
+          other.lastModifiedBy == lastModifiedBy &&
+          other.revision == revision &&
+          _deepEquals(other.custom, custom) &&
+          _deepEquals(other.extra, extra));
+
+  @override
+  int get hashCode => Object.hash(
+    title,
+    creator,
+    subject,
+    description,
+    _deepHash(keywords),
+    language,
+    category,
+    created,
+    modified,
+    lastModifiedBy,
+    revision,
+    _deepHash(custom),
+    _deepHash(extra),
+  );
+
+  @override
+  String toString() =>
+      'DocumentMetadata(title: $title, creator: $creator, '
+      'keywords: ${keywords.length}, custom: ${custom.length})';
+}
+
 /// The root IR node representing a complete DOCX document.
 ///
 /// [Document] contains all block-level content ([blocks]), footnote definitions
@@ -328,10 +515,12 @@ final class Document extends DocNode {
     required Iterable<Block> blocks,
     Map<String, FootnoteDefinition> footnotes = const {},
     Iterable<DocWarning> warnings = const [],
+    DocumentMetadata? metadata,
     super.meta,
   }) : blocks = _freezeList(blocks),
        footnotes = Map.unmodifiable(footnotes),
-       warnings = _freezeList(warnings);
+       warnings = _freezeList(warnings),
+       metadata = metadata ?? DocumentMetadata.empty;
 
   /// The block-level content of the document in order.
   ///
@@ -350,20 +539,26 @@ final class Document extends DocNode {
   /// tables that were downgraded. Check after conversion to assess fidelity.
   final List<DocWarning> warnings;
 
+  /// Structured metadata parsed from `docProps/core.xml` and
+  /// `docProps/custom.xml`. [DocumentMetadata.empty] when none is present.
+  final DocumentMetadata metadata;
+
   @override
-  List<Object?> get props => <Object?>[blocks, footnotes];
+  List<Object?> get props => <Object?>[blocks, footnotes, metadata];
 
   /// Creates a copy with the given fields replaced.
   Document copyWith({
     Iterable<Block>? blocks,
     Map<String, FootnoteDefinition>? footnotes,
     Iterable<DocWarning>? warnings,
+    DocumentMetadata? metadata,
     NodeMeta? meta,
   }) {
     return Document(
       blocks: blocks ?? this.blocks,
       footnotes: footnotes ?? this.footnotes,
       warnings: warnings ?? this.warnings,
+      metadata: metadata ?? this.metadata,
       meta: meta ?? this.meta,
     );
   }
@@ -686,6 +881,77 @@ final class ListItem extends DocNode {
 
   @override
   String toString() => 'ListItem(blocks: ${blocks.length}, checked: $checked)';
+}
+
+/// A definition list (description list) mapping terms to their definitions.
+///
+/// [DefinitionListBlock] represents Word/Pandoc definition lists: a sequence of
+/// [DefinitionListItem]s, each pairing a term with its definition body. In
+/// OOXML these come from paragraphs styled "Definition Term" and "Definition"
+/// (Pandoc's reference style names); the [StyleRegistry] detects them.
+///
+/// Markdown has no native definition-list syntax, so rendering depends on
+/// [DocxToMarkdownConfig.definitionListMode]; by default an HTML `<dl>` is
+/// emitted, which renders in GitHub Flavored Markdown, CommonMark, and Pandoc.
+///
+/// See also:
+/// - [DefinitionListItem] for a single term/definition pair
+/// - [DocxToMarkdownConfig.definitionListMode] for rendering options
+@immutable
+final class DefinitionListBlock extends Block {
+  /// Creates a definition list from the given items.
+  DefinitionListBlock({required Iterable<DefinitionListItem> items, super.meta})
+    : items = _freezeList(items);
+
+  /// The term/definition pairs in this list, in document order.
+  final List<DefinitionListItem> items;
+
+  @override
+  List<Object?> get props => <Object?>[items];
+
+  @override
+  String toString() => 'DefinitionListBlock(items: ${items.length})';
+}
+
+/// A single entry in a [DefinitionListBlock]: a term and its definition body.
+///
+/// The [term] holds the inline content of the "Definition Term" paragraph (the
+/// `<dt>`). The [definitions] hold the block(s) of the definition body (the
+/// `<dd>`), gathered from the consecutive "Definition" paragraphs that follow
+/// the term. A term with no following definition keeps an empty [definitions]
+/// list rather than being dropped.
+///
+/// Like [ListItem], this is a [DocNode] (not a [Block]); it only appears inside
+/// a [DefinitionListBlock]. Source style metadata (for example `styleId`) is
+/// carried on [meta] for hooks.
+///
+/// See also:
+/// - [DefinitionListBlock] the container for these items
+@immutable
+final class DefinitionListItem extends DocNode {
+  /// Creates a definition-list item from a term and its definition body blocks.
+  DefinitionListItem({
+    required Iterable<Inline> term,
+    required Iterable<Block> definitions,
+    super.meta,
+  }) : term = _freezeList(term),
+       definitions = _freezeList(definitions);
+
+  /// The inline content of the term (rendered as the `<dt>`).
+  final List<Inline> term;
+
+  /// The definition body blocks (rendered as the `<dd>`), in document order.
+  ///
+  /// Usually [ParagraphBlock]s; may contain any block type. Empty when a term
+  /// has no following definition.
+  final List<Block> definitions;
+
+  @override
+  List<Object?> get props => <Object?>[term, definitions];
+
+  @override
+  String toString() =>
+      'DefinitionListItem(term: ${term.length}, definitions: ${definitions.length})';
 }
 
 /// A table with rows, cells, and optional column alignments.
