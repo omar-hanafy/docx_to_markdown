@@ -7,7 +7,7 @@
 /// ## Capabilities
 ///
 /// - **Content extraction**: paragraphs, headings, nested lists, tables
-/// - **Image handling**: extracts embedded images to a directory or embeds as data URIs
+/// - **Image handling**: extracts embedded images to a directory or asset sink
 /// - **Text formatting**: bold, italic, strikethrough, underline, inline code
 /// - **Extensibility**: hooks let you rewrite links, transform blocks, or inject custom logic
 ///
@@ -36,14 +36,15 @@
 /// ```
 ///
 /// See also:
-/// - [DocxConverter] — the main conversion entry point
-/// - [DocxToMarkdownConfig] — all configuration options
-/// - [Document] — the intermediate representation if you need lower-level access
+/// - [DocxConverter] - the main conversion entry point
+/// - [DocxToMarkdownConfig] - all configuration options
+/// - [Document] - the intermediate representation if you need lower-level access
 library;
 
 import 'dart:typed_data';
 
 import 'package:docx_to_markdown/src/config.dart';
+import 'package:docx_to_markdown/src/media.dart';
 import 'package:docx_to_markdown/src/markdown_renderer.dart';
 import 'package:docx_to_markdown/src/ooxml_package.dart';
 import 'package:docx_to_markdown/src/parser.dart';
@@ -51,6 +52,7 @@ import 'package:docx_to_markdown/src/styles.dart';
 
 export 'src/config.dart';
 export 'src/ir.dart';
+export 'src/media.dart';
 export 'src/ooxml_package.dart' show DocxPackageException;
 
 /// Parses DOCX bytes and renders Markdown output.
@@ -67,9 +69,9 @@ export 'src/ooxml_package.dart' show DocxPackageException;
 ///
 /// ### Side Effects
 ///
-/// - **Image extraction**: If [DocxToMarkdownConfig.extractImages] is `true`
-///   and you pass an `imageOutputDirectory` to [convert], image files are
-///   written to disk.
+/// - **Image export**: If [DocxToMarkdownConfig.extractImages] is `true`, pass
+///   either an `imageOutputDirectory` for VM/native disk extraction or an
+///   `imageAssetSink` for web-safe caller-owned assets.
 /// - **Warnings**: Non-fatal issues (unsupported elements, complex tables)
 ///   are reported via [DocxToMarkdownHooks.onWarning] if configured.
 ///
@@ -116,18 +118,36 @@ class DocxConverter {
   ///
   /// - [imageOutputDirectory]: If provided (and [DocxToMarkdownConfig.extractImages]
   ///   is `true`), embedded images are extracted to this directory. Image
-  ///   references in the output Markdown use relative paths. If omitted,
-  ///   images may be embedded as data URIs or omitted depending on config.
+  ///   references in the output Markdown use relative paths. This option
+  ///   requires VM/native file IO.
+  /// - [imageAssetSink]: If provided (and [DocxToMarkdownConfig.extractImages]
+  ///   is `true`), embedded image bytes are sent to the sink. The sink's
+  ///   returned string becomes the Markdown image source. Returning `null` or
+  ///   an empty string skips that image.
   ///
   /// ### Throws
   ///
   /// - [DocxPackageException] if [_bytes] is empty or not a valid ZIP/DOCX file.
+  /// - [ArgumentError] if both [imageOutputDirectory] and [imageAssetSink] are
+  ///   provided.
+  /// - [UnsupportedError] if [imageOutputDirectory] is used on a platform
+  ///   without local file IO, such as web.
   ///
   /// ### Side Effects
   ///
   /// - Writes image files to [imageOutputDirectory] if specified.
+  /// - Invokes [imageAssetSink] for embedded images if specified.
   /// - Invokes [DocxToMarkdownHooks.onWarning] for non-fatal parsing issues.
-  Future<String> convert({String? imageOutputDirectory}) async {
+  Future<String> convert({
+    String? imageOutputDirectory,
+    DocxImageAssetSink? imageAssetSink,
+  }) async {
+    if (imageOutputDirectory != null && imageAssetSink != null) {
+      throw ArgumentError(
+        'Pass either imageOutputDirectory or imageAssetSink, not both.',
+      );
+    }
+
     // Input validation for better error messages
     if (_bytes.isEmpty) {
       throw DocxPackageException('Empty file: cannot convert empty bytes');
@@ -141,12 +161,20 @@ class DocxConverter {
     try {
       // 1. Extract media if requested
       final mediaMap = <String, String>{};
-      if (config.extractImages && imageOutputDirectory != null) {
-        final extracted = await package.extractMediaToDirectory(
-          imageOutputDirectory,
-          overwrite: true,
-        );
-        mediaMap.addAll(extracted);
+      var allowUnmappedMediaReferences = false;
+      if (config.extractImages) {
+        if (imageAssetSink != null) {
+          final extracted = await package.extractMediaToSink(imageAssetSink);
+          mediaMap.addAll(extracted);
+        } else if (imageOutputDirectory != null) {
+          final extracted = await package.extractMediaToDirectory(
+            imageOutputDirectory,
+            overwrite: true,
+          );
+          mediaMap.addAll(extracted);
+        } else {
+          allowUnmappedMediaReferences = true;
+        }
       }
 
       // 2. Load styles
@@ -165,6 +193,7 @@ class DocxConverter {
         styles: styles,
         config: config,
         mediaMap: mediaMap,
+        allowUnmappedMediaReferences: allowUnmappedMediaReferences,
         onWarning: (w) {
           if (config.hooks.onWarning != null) {
             config.hooks.onWarning!(

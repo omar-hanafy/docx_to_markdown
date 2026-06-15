@@ -22,12 +22,12 @@
 //   collection: ^1.18.x (optional but handy)
 
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
-import 'package:archive/archive_io.dart';
 import 'package:collection/collection.dart';
+import 'package:docx_to_markdown/src/media.dart';
+import 'package:docx_to_markdown/src/platform_io.dart' as platform_io;
 import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 
@@ -195,13 +195,13 @@ class DocxRelationships {
 /// - Correct relationship resolution per OPC rules.
 /// - Lazy, cached XML parsing for efficiency.
 class DocxPackage {
-  DocxPackage._({required this._archive, this._inputStream}) {
+  DocxPackage._(this._archive, [this._opened]) {
     _indexArchiveFiles();
     _validatePackageShape();
   }
 
   final Archive _archive;
-  final InputFileStream? _inputStream; // non-null when opened in streaming mode
+  final platform_io.OpenedArchive? _opened;
   bool _closed = false;
 
   // Maximum number of XML documents to cache (prevents unbounded memory growth)
@@ -215,6 +215,9 @@ class DocxPackage {
 
   // Relationships cache (key: canonical sourcePartPath)
   final Map<String, DocxRelationships> _relsCache = {};
+
+  // Content-type cache parsed from [Content_Types].xml.
+  _ContentTypes? _contentTypes;
 
   // Resolved main document part path cache
   String? _mainDocumentPartPath;
@@ -236,8 +239,14 @@ class DocxPackage {
     String filePath, {
     bool streaming = false,
   }) async {
-    final file = File(filePath);
-    if (!file.existsSync()) {
+    if (!platform_io.supportsFileIo) {
+      throw UnsupportedError(
+        'DocxPackage.openFile is not supported on this platform. '
+        'Read the DOCX into bytes and use DocxPackage.openBytes instead.',
+      );
+    }
+
+    if (!platform_io.fileExistsSync(filePath)) {
       throw DocxPackageException('File not found: $filePath');
     }
     if (!filePath.toLowerCase().endsWith('.docx')) {
@@ -245,21 +254,19 @@ class DocxPackage {
     }
 
     if (!streaming) {
-      final bytes = await file.readAsBytes();
+      final bytes = await platform_io.readFileBytes(filePath);
       return openBytes(bytes);
     }
 
-    // Streaming mode
-    final input = InputFileStream(filePath);
+    platform_io.OpenedArchive? opened;
     try {
-      final archive = ZipDecoder().decodeStream(input);
-      return DocxPackage._(archive: archive, inputStream: input);
+      opened = await platform_io.openArchiveStream(filePath);
+      return DocxPackage._(opened.archive, opened);
     } on DocxPackageException {
-      await input.close();
+      await opened?.close();
       rethrow;
     } catch (e) {
-      // Ensure we don't leak file handles on failure
-      await input.close();
+      await opened?.close();
       throw DocxPackageException(
         'Invalid DOCX/ZIP package: $e',
         part: filePath,
@@ -271,7 +278,7 @@ class DocxPackage {
   static DocxPackage openBytes(Uint8List bytes) {
     try {
       final archive = ZipDecoder().decodeBytes(bytes);
-      return DocxPackage._(archive: archive);
+      return DocxPackage._(archive);
     } on DocxPackageException {
       rethrow;
     } catch (e) {
@@ -294,20 +301,18 @@ class DocxPackage {
       } catch (_) {}
     }
 
-    // Close zip input stream if used.
-    if (_inputStream != null) {
-      try {
-        await _inputStream.close();
-      } catch (_) {}
-    }
+    try {
+      await _opened?.close();
+    } catch (_) {}
 
     _filesByCanonicalName.clear();
     _xmlCache.clear();
     _relsCache.clear();
+    _contentTypes = null;
   }
 
   /// True if this instance was opened using streaming IO.
-  bool get isStreaming => _inputStream != null;
+  bool get isStreaming => _opened?.isStreaming ?? false;
 
   /// List all part paths in the archive (canonical posix paths).
   Iterable<String> get partNames sync* {
@@ -615,6 +620,43 @@ class DocxPackage {
     return resolveRelTarget(mainDocumentPartPath, rId);
   }
 
+  /// Returns embedded image assets under `word/media/`.
+  ///
+  /// The generated [DocxImageAsset.suggestedFilename] values are stable for a
+  /// given package and mirror the filenames used by [extractMediaToDirectory].
+  Iterable<DocxImageAsset> mediaAssets({String? filenamePrefix}) sync* {
+    for (final entry in _mediaEntries(filenamePrefix: filenamePrefix)) {
+      final bytes = entry.file.readBytes();
+      if (bytes == null) continue;
+      yield DocxImageAsset(
+        partPath: entry.partPath,
+        suggestedFilename: entry.suggestedFilename,
+        contentType: _contentTypeForPart(entry.partPath),
+        bytes: bytes,
+      );
+    }
+  }
+
+  /// Sends embedded image assets to [sink] and returns package-path mappings.
+  ///
+  /// The returned map is suitable for the parser's media lookup:
+  /// `word/media/image1.png` to the Markdown image source returned by [sink].
+  /// If [sink] returns `null` or an empty string, that image is omitted.
+  Future<Map<String, String>> extractMediaToSink(
+    DocxImageAssetSink sink, {
+    String? filenamePrefix,
+  }) async {
+    _ensureOpen();
+    final out = <String, String>{};
+    for (final asset in mediaAssets(filenamePrefix: filenamePrefix)) {
+      final target = await sink(asset);
+      if (target != null && target.isNotEmpty) {
+        out[asset.partPath] = target;
+      }
+    }
+    return out;
+  }
+
   /// Extract all files under word/media/ to [outputDir].
   ///
   /// Returns a mapping:
@@ -631,62 +673,36 @@ class DocxPackage {
     String? filenamePrefix,
   }) async {
     _ensureOpen();
-
-    final dir = Directory(outputDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
+    if (!platform_io.supportsFileIo) {
+      throw UnsupportedError(
+        'Writing images to a directory is not supported on this platform. '
+        'Use DocxConverter.convert(imageAssetSink: ...) or set '
+        'extractImages to false.',
+      );
+    }
+    await platform_io.ensureDirectory(outputDir);
 
     final out = <String, String>{};
 
-    final mediaEntries = _filesByCanonicalName.entries.where((e) {
-      final name = e.key;
-      return name.startsWith('word/media/') && !e.value.isDirectory;
-    });
-
-    int globalCounter = 0;
-
-    for (final entry in mediaEntries) {
-      final partPath = entry.key;
-      final file = entry.value;
-
-      // Flatten hierarchy: preserve extension, but ensure uniqueness.
-      globalCounter++;
-      final ext = p.posix.extension(partPath);
-      final originalNameNoExt = p.posix.basenameWithoutExtension(partPath);
-
-      // Construct a name that is likely stable but unique.
-      // We append a counter to handle duplicates from different folders if any,
-      // or if overwrite=false and file exists (handled below).
-      // However, to strictly follow the instruction "Ensure unique image filenames across subfolders":
-      // We can just use the counter if we don't care about the original name,
-      // or append the counter.
-
-      final prefix = (filenamePrefix == null || filenamePrefix.isEmpty)
-          ? ''
-          : filenamePrefix;
-      final baseName = '$prefix${originalNameNoExt}_$globalCounter$ext';
-
-      var outName = baseName;
+    for (final entry in _mediaEntries(filenamePrefix: filenamePrefix)) {
+      var outName = entry.suggestedFilename;
       var outPath = p.join(outputDir, outName);
 
-      // Handle local filesystem collisions (if overwrite is false)
       if (!overwrite) {
         int localCounter = 0;
-        while (File(outPath).existsSync()) {
+        while (platform_io.outputFileExistsSync(outPath)) {
           localCounter++;
-          outName = _appendSuffixBeforeExtension(baseName, '_$localCounter');
+          outName = _appendSuffixBeforeExtension(
+            entry.suggestedFilename,
+            '_$localCounter',
+          );
           outPath = p.join(outputDir, outName);
         }
       }
 
-      final outputStream = OutputFileStream(outPath);
-      try {
-        // Stream out decompressed file content. freeMemory helps keep RAM stable.
-        file.writeContent(outputStream, freeMemory: true);
-      } finally {
-        await outputStream.close();
-      }
+      await platform_io.writeArchiveFile(outPath, entry.file);
 
-      out[partPath] = returnFullPath ? outPath : outName;
+      out[entry.partPath] = returnFullPath ? outPath : outName;
     }
 
     return out;
@@ -747,6 +763,51 @@ class DocxPackage {
 
     final candidate = _canonicalPartPath(rel.resolvedTarget);
     return hasPart(candidate) ? candidate : null;
+  }
+
+  List<_MediaEntry> _mediaEntries({String? filenamePrefix}) {
+    _ensureOpen();
+    final entries =
+        _filesByCanonicalName.entries
+            .where(
+              (e) => e.key.startsWith('word/media/') && !e.value.isDirectory,
+            )
+            .toList()
+          ..sort((a, b) => a.key.compareTo(b.key));
+
+    final prefix = (filenamePrefix == null || filenamePrefix.isEmpty)
+        ? ''
+        : filenamePrefix;
+    final out = <_MediaEntry>[];
+    for (var i = 0; i < entries.length; i++) {
+      final partPath = entries[i].key;
+      final ext = p.posix.extension(partPath);
+      final name = p.posix.basenameWithoutExtension(partPath);
+      out.add(
+        _MediaEntry(
+          partPath: partPath,
+          file: entries[i].value,
+          suggestedFilename: '$prefix${name}_${i + 1}$ext',
+        ),
+      );
+    }
+    return out;
+  }
+
+  String _contentTypeForPart(String partPath) {
+    final key = _canonicalPartPath(partPath);
+    final types = _contentTypes ??= _ContentTypes.fromXml(
+      tryLoadXml('[Content_Types].xml'),
+    );
+    final override = types.overrides[key];
+    if (override != null && override.isNotEmpty) return override;
+
+    final ext = p.posix.extension(key).replaceFirst('.', '').toLowerCase();
+    final declaredDefault = types.defaults[ext];
+    if (declaredDefault != null && declaredDefault.isNotEmpty) {
+      return declaredDefault;
+    }
+    return _fallbackContentTypeForExtension(ext);
   }
 
   static String _appendSuffixBeforeExtension(String name, String suffix) {
@@ -819,6 +880,83 @@ class DocxPackage {
         : p.posix.dirname(sourcePartPath);
     final resolved = p.posix.normalize(p.posix.join(baseDir, t));
     return _canonicalPartPath(resolved);
+  }
+}
+
+class _MediaEntry {
+  _MediaEntry({
+    required this.partPath,
+    required this.file,
+    required this.suggestedFilename,
+  });
+
+  final String partPath;
+  final ArchiveFile file;
+  final String suggestedFilename;
+}
+
+class _ContentTypes {
+  _ContentTypes({required this.defaults, required this.overrides});
+
+  factory _ContentTypes.fromXml(XmlDocument? xml) {
+    final defaults = <String, String>{};
+    final overrides = <String, String>{};
+    if (xml == null) {
+      return _ContentTypes(defaults: defaults, overrides: overrides);
+    }
+
+    for (final el in xml.descendants.whereType<XmlElement>()) {
+      switch (el.name.local) {
+        case 'Default':
+          final extension = el.getAttribute('Extension')?.toLowerCase();
+          final contentType = el.getAttribute('ContentType');
+          if (extension != null && contentType != null) {
+            defaults[extension] = contentType;
+          }
+          break;
+        case 'Override':
+          final partName = el.getAttribute('PartName');
+          final contentType = el.getAttribute('ContentType');
+          if (partName != null && contentType != null) {
+            final normalized = p.posix.normalize(
+              partName.replaceAll('\\', '/').replaceFirst(RegExp('^/+'), ''),
+            );
+            overrides[normalized] = contentType;
+          }
+          break;
+      }
+    }
+    return _ContentTypes(defaults: defaults, overrides: overrides);
+  }
+
+  final Map<String, String> defaults;
+  final Map<String, String> overrides;
+}
+
+String _fallbackContentTypeForExtension(String extension) {
+  switch (extension) {
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'bmp':
+      return 'image/bmp';
+    case 'webp':
+      return 'image/webp';
+    case 'svg':
+      return 'image/svg+xml';
+    case 'tif':
+    case 'tiff':
+      return 'image/tiff';
+    case 'emf':
+      return 'image/x-emf';
+    case 'wmf':
+      return 'image/x-wmf';
+    default:
+      return 'application/octet-stream';
   }
 }
 

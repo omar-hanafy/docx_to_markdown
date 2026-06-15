@@ -216,6 +216,23 @@ void main() {
       expect(File(filePath).existsSync(), isTrue);
     });
 
+    test('mediaAssets exposes bytes and stable metadata', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Media')),
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      final asset = pkg.mediaAssets().single;
+      expect(asset.partPath, 'word/media/image1.png');
+      expect(asset.suggestedFilename, 'image1_1.png');
+      expect(asset.contentType, 'image/png');
+      expect(asset.bytes, [1, 2, 3]);
+    });
+
     test('resolves core/custom property parts via root rels', () async {
       final bytes = buildDocxBytes(
         documentXml: docXmlWithBody(wP(text: 'Hi')),

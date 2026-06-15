@@ -53,12 +53,15 @@ class DocxParser {
   /// - [styles]: Pre-loaded style definitions for heading/code detection
   /// - [config]: Conversion settings (what to include, how to handle unknowns)
   /// - [mediaMap]: Mapping from internal media paths to output paths
+  /// - [allowUnmappedMediaReferences]: Whether missing media mappings may
+  ///   fall back to the original media filename.
   /// - [onWarning]: Callback for non-fatal issues encountered during parsing
   DocxParser({
     required this.package,
     required this.styles,
     required this.config,
     required this.mediaMap,
+    this.allowUnmappedMediaReferences = true,
     required this.onWarning,
   }) : _numbering = _NumberingModel.fromXml(package.numberingXml),
        _comments = _CommentIndex.fromXml(package.commentsXml);
@@ -75,6 +78,13 @@ class DocxParser {
   /// Mapping from internal media paths (e.g., `word/media/image1.png`) to
   /// output paths or URLs for use in the rendered Markdown.
   final Map<String, String> mediaMap;
+
+  /// Whether unresolved media mappings should fall back to source filenames.
+  ///
+  /// This preserves legacy conversion behavior when no image export target is
+  /// provided. When an explicit sink or directory is used, this is disabled so
+  /// skipped or failed image exports do not render broken Markdown references.
+  final bool allowUnmappedMediaReferences;
 
   /// Callback invoked for each non-fatal warning during parsing.
   final WarningSink onWarning;
@@ -1920,6 +1930,8 @@ class DocxParser {
   }
 
   String? _resolveMediaTarget(String rId, {required _ParseContext ctx}) {
+    if (!config.extractImages) return null;
+
     // PART-AWARE
     final target = package.resolveRelTarget(ctx.partPath, rId);
     if (target == null || target.isEmpty) return null;
@@ -1940,6 +1952,7 @@ class DocxParser {
     final partPath = t.startsWith('word/') ? t : 'word/$t';
     final mapped = mediaMap[partPath];
     if (mapped != null && mapped.isNotEmpty) return mapped;
+    if (!allowUnmappedMediaReferences) return null;
     return t.split('/').last;
   }
 

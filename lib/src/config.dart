@@ -820,9 +820,9 @@ class DocxToMarkdownConfig {
 
   /// Whether to extract embedded images from the DOCX. Defaults to `true`.
   ///
-  /// When `true` and an `imageOutputDirectory` is passed to [DocxConverter.convert],
-  /// images are written to disk and referenced by relative path. When `false`,
-  /// images are omitted from output.
+  /// When `true`, images are included when the converter can map them to a
+  /// filename, URL, or asset sink result. When `false`, DOCX images are omitted
+  /// from output and no image export callback is invoked.
   final bool extractImages;
 
   /// Whether to include footnotes in the output. Defaults to `true`.

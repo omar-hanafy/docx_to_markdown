@@ -712,6 +712,153 @@ void main() {
       expect(markdown.trim(), 'Before ![Inline image](image1.png) after');
     });
 
+    test('imageAssetSink maps embedded images', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(embedId: 'rId2', descr: 'AltText'),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+
+      final assets = <DocxImageAsset>[];
+      final markdown = await DocxConverter(bytes).convert(
+        imageAssetSink: (asset) {
+          assets.add(asset);
+          return 'assets/${asset.suggestedFilename}';
+        },
+      );
+
+      expect(markdown.trim(), '![AltText](assets/image1_1.png)');
+      expect(assets, hasLength(1));
+      expect(assets.single.partPath, 'word/media/image1.png');
+      expect(assets.single.suggestedFilename, 'image1_1.png');
+      expect(assets.single.contentType, 'image/png');
+      expect(assets.single.bytes, [1, 2, 3]);
+    });
+
+    test('imageAssetSink can skip an image', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml:
+              '${wT("Before ")}'
+              '${wDrawingImage(embedId: "rId2", descr: "Inline image")}'
+              '${wT(" after")}',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+
+      final markdown = await DocxConverter(
+        bytes,
+      ).convert(imageAssetSink: (_) => null);
+
+      expect(markdown.trim(), 'Before  after');
+    });
+
+    test('extractImages false skips images and does not call sink', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml:
+              '${wT("Before ")}'
+              '${wDrawingImage(embedId: "rId2", descr: "Inline image")}'
+              '${wT(" after")}',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+      var called = false;
+
+      final markdown =
+          await DocxConverter(
+            bytes,
+            config: DocxToMarkdownConfig(extractImages: false),
+          ).convert(
+            imageAssetSink: (_) {
+              called = true;
+              return 'image.png';
+            },
+          );
+
+      expect(called, isFalse);
+      expect(markdown.trim(), 'Before  after');
+    });
+
+    test('imageAssetSink errors are propagated', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(embedId: 'rId2', descr: 'AltText'),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+
+      expect(
+        DocxConverter(
+          bytes,
+        ).convert(imageAssetSink: (_) => throw StateError('upload failed')),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('imageOutputDirectory and imageAssetSink are mutually exclusive', () {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Hello')),
+      );
+
+      expect(
+        DocxConverter(bytes).convert(
+          imageOutputDirectory: 'images',
+          imageAssetSink: (_) => 'image.png',
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
     test('parses w:highlight and renders as mark when enabled', () async {
       final body = wP(
         innerXml: wR(text: 'x', rPrXml: '<w:highlight w:val="yellow"/>'),
@@ -833,6 +980,28 @@ void main() {
       );
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '![Image](vml.png)');
+    });
+
+    test('extractImages false skips VML images', () async {
+      final body = wP(
+        innerXml:
+            '<w:r>${wT("Before ")}${vmlImage("rId5")}${wT(" after")}</w:r>',
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId5',
+            type: DocxRelTypes.image,
+            target: 'media/vml.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(extractImages: false),
+      ).convert();
+      expect(markdown.trim(), 'Before  after');
     });
 
     test('VML image with missing rel is ignored', () async {

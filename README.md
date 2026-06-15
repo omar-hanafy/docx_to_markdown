@@ -4,7 +4,7 @@
 
 Convert Word `.docx` (OOXML) files to clean, deterministic Markdown - in pure Dart.
 
-`docx_to_markdown` parses a document into a structured intermediate representation (IR) and *then* renders it, rather than scraping text run by run. That extra step is what buys **Pandoc-level structural fidelity** - deeply nested lists, complex tables, footnotes, math, and definition lists survive the trip - while keeping the package **100% pure Dart with zero native dependencies**. It runs anywhere Dart runs: server, CLI, and Flutter on Android, iOS, macOS, Windows, and Linux.
+`docx_to_markdown` parses a document into a structured intermediate representation (IR) and *then* renders it, rather than scraping text run by run. That extra step is what buys **Pandoc-level structural fidelity** - deeply nested lists, complex tables, footnotes, math, and definition lists survive the trip - while keeping the package **100% pure Dart with zero native dependencies**. It runs anywhere Dart runs: server, CLI, Flutter on Android, iOS, macOS, Windows, Linux, and browser-based Flutter web apps.
 
 ```dart
 final bytes = File('report.docx').readAsBytesSync();
@@ -59,7 +59,7 @@ Future<void> main() async {
 }
 ```
 
-`DocxConverter` never touches the disk or network on its own - you supply the bytes, and it returns a Markdown `String`. Invalid input (empty bytes or a non-ZIP file) throws a `DocxPackageException`.
+By default, `DocxConverter` never touches the disk or network - you supply the bytes, and it returns a Markdown `String`. Disk image extraction happens only when you pass `imageOutputDirectory`. Invalid input (empty bytes or a non-ZIP file) throws a `DocxPackageException`.
 
 ## Configuration
 
@@ -85,11 +85,39 @@ final config = DocxToMarkdownConfig(
 
 final converter = DocxConverter(bytes, config: config);
 
-// Provide a directory to write extracted images; references become relative paths.
+// On VM/native platforms, provide a directory to write extracted images.
 final markdown = await converter.convert(imageOutputDirectory: 'assets/images');
 ```
 
 Configs are immutable; use `config.copyWith(...)` to derive variants.
+
+### Web image handling
+
+On Flutter web or browser tests, pass bytes from your picker/uploader and use `imageAssetSink` to decide where image bytes go. The returned string becomes the Markdown image source:
+
+```dart
+final exportedImages = <DocxImageAsset>[];
+
+final markdown = await DocxConverter(bytes).convert(
+  imageAssetSink: (asset) {
+    exportedImages.add(asset);
+    return 'images/${asset.suggestedFilename}';
+  },
+);
+```
+
+The sink receives the image package path, suggested filename, MIME type, and bytes. It can return a Blob URL, upload URL, app-local key, data URI, or any source your Markdown renderer understands. Return `null` or an empty string to skip one image.
+
+To remove all images from the output and avoid reading/exporting image bytes:
+
+```dart
+final markdown = await DocxConverter(
+  bytes,
+  config: DocxToMarkdownConfig(extractImages: false),
+).convert();
+```
+
+`imageOutputDirectory` requires VM/native file IO. Use `imageAssetSink` on web.
 
 ### Key options
 
@@ -107,7 +135,7 @@ Configs are immutable; use `config.copyWith(...)` to derive variants.
 
 | Option | Default | Notes |
 |---|---|---|
-| `extractImages` | `true` | Pair with `imageOutputDirectory` on `convert()`. |
+| `extractImages` | `true` | Use `imageOutputDirectory` on VM/native or `imageAssetSink` on web. Set `false` to skip all images. |
 | `imageSizeMode` | `none` | `none`, `obsidian` (`=WxH`), or `pandoc` (`{ width=... }`). |
 | `includeFootnotes` | `true` | GFM `[^1]` footnote syntax. |
 | `includeEndnotes` | `false` | Treated like footnotes when enabled. |
@@ -179,7 +207,7 @@ final hooks = DocxToMarkdownHooks(
   rewriteLinkTarget: (url, [ctx]) =>
       url.startsWith('/') ? 'https://example.com$url' : url,
 
-  // Send extracted images to a CDN.
+  // Rewrite image references after export.
   rewriteImageTarget: (src, [ctx]) => 'https://cdn.example.com/${src.split('/').last}',
 
   // Drop every table from the output.
@@ -205,7 +233,7 @@ final markdown =
 | Lists | `- item` / `1. item` | Deep nesting, mixed and ordered/unordered. |
 | Task lists | `- [ ]` / `- [x]` | GFM checkboxes. |
 | Tables | `\| col \|` or `<table>` | Simple tables use pipes; complex ones fall back to HTML. |
-| Images | `![alt](src)` | Extracted to disk and/or rewritten via hooks; optional sizing. |
+| Images | `![alt](src)` | Extracted to disk, exported through an asset sink, or skipped; optional sizing. |
 | Links | `[text](url)` | Web links and internal bookmarks. |
 | Bold / italic | `**bold**`, `*italic*` | Plus `~~strikethrough~~` and sub/superscript. |
 | Underline | `<u>` / `++..++` | Configurable via `underlineMode`. |
@@ -221,7 +249,6 @@ final markdown =
 
 Worth knowing before you adopt:
 
-- **No Flutter web.** Image extraction relies on `dart:io`, so the package targets the Dart VM and Flutter on mobile/desktop, not the web platform.
 - **SmartArt, charts, and embedded objects** cannot be cleanly represented in Markdown. By default their text content is preserved (`unknownElementPolicy: keepText`) and a warning is emitted; the visual structure is lost.
 - **Page geometry** - sections, columns, margins, and page size - has no Markdown equivalent and is not modeled. Explicit page breaks can optionally become a thematic break or an HTML comment.
 - **Headers, footers, comments, and endnotes** are off by default; enable them explicitly when you want them in the output.

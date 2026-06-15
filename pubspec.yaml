@@ -16,6 +16,14 @@ topics:
   - word
   - documents
 
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
+
 environment:
   sdk: ^3.12.0
 
