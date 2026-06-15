@@ -38,6 +38,19 @@ enum StyleType {
   unknown,
 }
 
+/// Whether a paragraph style marks a definition-list term or definition body.
+///
+/// Used by [StyleRegistry.definitionRole] to detect Word/Pandoc definition
+/// lists, which use the paragraph styles named "Definition Term" and
+/// "Definition".
+enum DefinitionRole {
+  /// The style marks a definition term (the `<dt>`).
+  term,
+
+  /// The style marks a definition body (the `<dd>`).
+  definition,
+}
+
 StyleType _parseStyleType(String? raw) {
   switch ((raw ?? '').toLowerCase()) {
     case 'paragraph':
@@ -64,6 +77,17 @@ class StyleRunProperties {
     this.hAnsiFont,
     this.csFont,
     this.hasShading = false,
+    this.shadingIsSet = false,
+    this.bold,
+    this.italic,
+    this.strike,
+    this.underline,
+    this.vertAlign,
+    this.vertAlignIsSet = false,
+    this.color,
+    this.colorIsSet = false,
+    this.highlight,
+    this.highlightIsSet = false,
   });
 
   /// The ASCII font family name (used for Latin characters).
@@ -79,6 +103,39 @@ class StyleRunProperties {
   ///
   /// Shading combined with a monospace font is a strong indicator of code.
   final bool hasShading;
+
+  /// Whether shading was specified, even when it resolves to no shading.
+  final bool shadingIsSet;
+
+  /// Whether bold is enabled, disabled, or unspecified by this style.
+  final bool? bold;
+
+  /// Whether italic is enabled, disabled, or unspecified by this style.
+  final bool? italic;
+
+  /// Whether strike-through is enabled, disabled, or unspecified by this style.
+  final bool? strike;
+
+  /// Whether underline is enabled, disabled, or unspecified by this style.
+  final bool? underline;
+
+  /// The vertical alignment value, such as `superscript` or `subscript`.
+  final String? vertAlign;
+
+  /// Whether [vertAlign] was specified, even if it resets to baseline.
+  final bool vertAlignIsSet;
+
+  /// The run text color value, when specified and not automatic.
+  final String? color;
+
+  /// Whether [color] was specified, even when it resolves to automatic.
+  final bool colorIsSet;
+
+  /// The highlight color value, when specified and not `none`.
+  final String? highlight;
+
+  /// Whether [highlight] was specified, even when it resolves to none.
+  final bool highlightIsSet;
 
   /// Returns `true` if any of the fonts appear to be monospace.
   ///
@@ -113,6 +170,27 @@ class StyleRunProperties {
 
     // Exact matches or substring hints.
     return monospaceHints.any((hint) => f == hint || f.contains(hint));
+  }
+
+  /// Returns a copy with [other]'s specified values overriding this instance.
+  StyleRunProperties merge(StyleRunProperties other) {
+    return StyleRunProperties(
+      asciiFont: other.asciiFont ?? asciiFont,
+      hAnsiFont: other.hAnsiFont ?? hAnsiFont,
+      csFont: other.csFont ?? csFont,
+      hasShading: other.shadingIsSet ? other.hasShading : hasShading,
+      shadingIsSet: shadingIsSet || other.shadingIsSet,
+      bold: other.bold ?? bold,
+      italic: other.italic ?? italic,
+      strike: other.strike ?? strike,
+      underline: other.underline ?? underline,
+      vertAlign: other.vertAlignIsSet ? other.vertAlign : vertAlign,
+      vertAlignIsSet: vertAlignIsSet || other.vertAlignIsSet,
+      color: other.colorIsSet ? other.color : color,
+      colorIsSet: colorIsSet || other.colorIsSet,
+      highlight: other.highlightIsSet ? other.highlight : highlight,
+      highlightIsSet: highlightIsSet || other.highlightIsSet,
+    );
   }
 }
 
@@ -208,6 +286,9 @@ class StyleRegistry {
 
   final Map<String, StyleAnalysis> _analysisCache = <String, StyleAnalysis>{};
 
+  final Map<String, DefinitionRole?> _definitionRoleCache =
+      <String, DefinitionRole?>{};
+
   final Set<String> _codeStyleNamesNorm = <String>{};
   final Set<String> _codeStyleIdsNorm = <String>{};
   List<String> _extraMonospaceHints = <String>[];
@@ -217,6 +298,7 @@ class StyleRegistry {
     _stylesById.clear();
     _styleIdsByNameNorm.clear();
     _analysisCache.clear();
+    _definitionRoleCache.clear();
     _codeStyleNamesNorm.clear();
     _codeStyleIdsNorm.clear();
     _extraMonospaceHints = <String>[];
@@ -229,6 +311,7 @@ class StyleRegistry {
     _stylesById.clear();
     _styleIdsByNameNorm.clear();
     _analysisCache.clear();
+    _definitionRoleCache.clear();
 
     if (stylesXml == null) return;
 
@@ -372,6 +455,7 @@ class StyleRegistry {
     bool isQuote = false;
 
     int depth = 0;
+    var atLeaf = true;
 
     while (current != null && depth++ < _maxStyleChainDepth) {
       if (!visited.add(current.id)) {
@@ -411,6 +495,7 @@ class StyleRegistry {
         final derived = _inferHeadingLevelFromIdOrName(
           current.id,
           current.name,
+          allowTitleSubtitle: atLeaf,
         );
         if (derived != null) {
           isHeading = true;
@@ -421,6 +506,7 @@ class StyleRegistry {
       // Walk up basedOn chain
       if (current.basedOn == null) break;
       current = _stylesById[current.basedOn!];
+      atLeaf = false;
     }
 
     final result = StyleAnalysis(
@@ -432,6 +518,128 @@ class StyleRegistry {
 
     _analysisCache[styleId] = result;
     return result;
+  }
+
+  /// Returns the definition-list role of a paragraph [styleId], or null.
+  ///
+  /// Walks the `w:basedOn` chain (with cycle protection) and matches each
+  /// style's id or visible name. A name/id resolving to "Definition Term"
+  /// yields [DefinitionRole.term]; one resolving to "Definition" yields
+  /// [DefinitionRole.definition]. Term is checked first because the term name
+  /// contains the definition name.
+  ///
+  /// Why walk the chain: a custom styleId (e.g. "MyTerm") may inherit its
+  /// identity from a parent named "Definition Term"; resolving the chain
+  /// recovers that intent (style-name fallback). Never throws.
+  DefinitionRole? definitionRole(String? styleId) {
+    if (styleId == null || styleId.isEmpty) return null;
+
+    if (_definitionRoleCache.containsKey(styleId)) {
+      return _definitionRoleCache[styleId];
+    }
+
+    DefinitionRole? result;
+    final visited = <String>{};
+    StyleDefinition? current = _stylesById[styleId];
+    int depth = 0;
+    while (current != null && depth++ < _maxStyleChainDepth) {
+      if (!visited.add(current.id)) break;
+      final role = _definitionRoleFor(current.id, current.name);
+      if (role != null) {
+        result = role;
+        break;
+      }
+      if (current.basedOn == null) break;
+      current = _stylesById[current.basedOn!];
+    }
+
+    _definitionRoleCache[styleId] = result;
+    return result;
+  }
+
+  static DefinitionRole? _definitionRoleFor(String id, String? name) {
+    String collapse(String s) =>
+        s.trim().toLowerCase().replaceAll(RegExp(r'[\s_-]+'), '');
+    final idKey = collapse(id);
+    final nameKey = name == null ? '' : collapse(name);
+    if (idKey == 'definitionterm' || nameKey == 'definitionterm') {
+      return DefinitionRole.term;
+    }
+    if (idKey == 'definition' || nameKey == 'definition') {
+      return DefinitionRole.definition;
+    }
+    return null;
+  }
+
+  /// Whether a character style (referenced by `w:rStyle`) indicates inline code.
+  ///
+  /// Walks the `w:basedOn` chain and returns `true` when any style in the chain
+  /// is a registered code style, matches the code-name heuristics, or carries a
+  /// monospace font. Word/Pandoc emit inline code via a "Verbatim Char"
+  /// character style (Consolas) rather than an inline `w:rFonts`, so resolving
+  /// the style chain is required to detect it.
+  ///
+  /// Unlike a paragraph style, a monospace font alone is treated as a code
+  /// signal here: applying an explicit monospace character style to a span is a
+  /// deliberate "this is code" gesture.
+  bool isCodeCharacterStyle(String? styleId) {
+    if (styleId == null || styleId.isEmpty) return false;
+
+    final visited = <String>{};
+    StyleDefinition? current = _stylesById[styleId];
+    int depth = 0;
+
+    while (current != null && depth++ < _maxStyleChainDepth) {
+      if (!visited.add(current.id)) break;
+
+      final idNorm = current.id.trim().toLowerCase();
+      final nameNorm = _normName(current.name);
+      if (_codeStyleIdsNorm.contains(idNorm) ||
+          (nameNorm != null && _codeStyleNamesNorm.contains(nameNorm)) ||
+          _looksLikeCodeStyle(current)) {
+        return true;
+      }
+
+      final rp = current.runProps;
+      if (rp != null &&
+          (rp.isProbablyMonospace || _hasExtraMonospaceHint(rp))) {
+        return true;
+      }
+
+      if (current.basedOn == null) break;
+      current = _stylesById[current.basedOn!];
+    }
+
+    return false;
+  }
+
+  /// Resolves effective run properties for a paragraph or character style.
+  ///
+  /// Walks the basedOn chain from the root style to the leaf style so child
+  /// styles override inherited values. Returns null when the style chain has no
+  /// run properties.
+  StyleRunProperties? resolveRunPropertiesForStyle(String? styleId) {
+    if (styleId == null || styleId.isEmpty) return null;
+
+    final visited = <String>{};
+    final chain = <StyleDefinition>[];
+    StyleDefinition? current = _stylesById[styleId];
+    int depth = 0;
+
+    while (current != null && depth++ < _maxStyleChainDepth) {
+      if (!visited.add(current.id)) break;
+      chain.add(current);
+      if (current.basedOn == null) break;
+      current = _stylesById[current.basedOn!];
+    }
+
+    StyleRunProperties? resolved;
+    for (final def in chain.reversed) {
+      final rp = def.runProps;
+      if (rp == null) continue;
+      resolved = resolved == null ? rp : resolved.merge(rp);
+    }
+    return resolved;
   }
 
   /// Resolves effective numbering properties for a paragraph style.
@@ -508,6 +716,7 @@ class StyleRegistry {
     const quoteHints = <String>[
       'quote',
       'blockquote',
+      'block text',
       'intense quote',
       'citation',
       'epigraph',
@@ -515,7 +724,11 @@ class StyleRegistry {
     return quoteHints.any((h) => name.contains(h) || id.contains(h));
   }
 
-  int? _inferHeadingLevelFromIdOrName(String styleId, String? styleName) {
+  int? _inferHeadingLevelFromIdOrName(
+    String styleId,
+    String? styleName, {
+    bool allowTitleSubtitle = true,
+  }) {
     // Example ids: Heading1, heading2, HEADING_3
     // Names: "Heading 1", "heading 2"
     final id = styleId.trim().toLowerCase();
@@ -535,9 +748,13 @@ class StyleRegistry {
       if (n != null && n > 0) return n;
     }
 
-    // Some templates use "Title" / "Subtitle" as heading-like
-    if (name == 'title' || id == 'title') return 1;
-    if (name == 'subtitle' || id == 'subtitle') return 2;
+    // "Title"/"Subtitle" map to heading-like levels, but only when this is the
+    // paragraph's own (leaf) style. A custom style merely basedOn "Title"
+    // (e.g. "Author") must not inherit heading-ness through this name heuristic.
+    if (allowTitleSubtitle) {
+      if (name == 'title' || id == 'title') return 1;
+      if (name == 'subtitle' || id == 'subtitle') return 2;
+    }
 
     return null;
   }
@@ -554,9 +771,39 @@ class StyleRegistry {
     final hAnsi = _attrLocal(rFonts, 'hAnsi');
     final cs = _attrLocal(rFonts, 'cs');
 
-    final hasShading = _childLocal(rPr, 'shd') != null;
+    final shadingEl = _childLocal(rPr, 'shd');
+    final hasShading = _parseShading(shadingEl);
+    final bold = _parseAnyOnOff(rPr, const ['b', 'bCs']);
+    final italic = _parseAnyOnOff(rPr, const ['i', 'iCs']);
+    final strike = _parseAnyOnOff(rPr, const ['strike', 'dstrike']);
+    final underline = _parseOnOff(_childLocal(rPr, 'u'));
+    final vertAlignEl = _childLocal(rPr, 'vertAlign');
+    final vertAlign = _attrLocal(vertAlignEl, 'val');
 
-    if (ascii == null && hAnsi == null && cs == null && !hasShading) {
+    final colorEl = _childLocal(rPr, 'color');
+    final rawColor = _attrLocal(colorEl, 'val');
+    final color = rawColor == null || rawColor.toLowerCase() == 'auto'
+        ? null
+        : rawColor;
+
+    final highlightEl = _childLocal(rPr, 'highlight');
+    final rawHighlight = _attrLocal(highlightEl, 'val');
+    final highlight =
+        rawHighlight == null || rawHighlight.toLowerCase() == 'none'
+        ? null
+        : rawHighlight;
+
+    if (ascii == null &&
+        hAnsi == null &&
+        cs == null &&
+        shadingEl == null &&
+        bold == null &&
+        italic == null &&
+        strike == null &&
+        underline == null &&
+        vertAlignEl == null &&
+        colorEl == null &&
+        highlightEl == null) {
       return null;
     }
 
@@ -565,7 +812,45 @@ class StyleRegistry {
       hAnsiFont: hAnsi,
       csFont: cs,
       hasShading: hasShading,
+      shadingIsSet: shadingEl != null,
+      bold: bold,
+      italic: italic,
+      strike: strike,
+      underline: underline,
+      vertAlign: vertAlign,
+      vertAlignIsSet: vertAlignEl != null,
+      color: color,
+      colorIsSet: colorEl != null,
+      highlight: highlight,
+      highlightIsSet: highlightEl != null,
     );
+  }
+
+  bool? _parseAnyOnOff(XmlElement rPr, Iterable<String> childLocalNames) {
+    var sawExplicitOff = false;
+    for (final name in childLocalNames) {
+      final parsed = _parseOnOff(_childLocal(rPr, name));
+      if (parsed == true) return true;
+      if (parsed == false) sawExplicitOff = true;
+    }
+    return sawExplicitOff ? false : null;
+  }
+
+  bool? _parseOnOff(XmlElement? el) {
+    if (el == null) return null;
+    final v = _attrLocal(el, 'val');
+    if (v == null) return true;
+    final normalized = v.trim().toLowerCase();
+    return normalized != 'false' &&
+        normalized != '0' &&
+        normalized != 'off' &&
+        normalized != 'none';
+  }
+
+  bool _parseShading(XmlElement? el) {
+    if (el == null) return false;
+    final v = _attrLocal(el, 'val')?.trim().toLowerCase();
+    return v != 'nil';
   }
 
   bool _hasExtraMonospaceHint(StyleRunProperties rp) {

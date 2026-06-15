@@ -91,6 +91,93 @@ enum UnderlineMode {
   ignore,
 }
 
+/// Controls how highlighted runs (`w:highlight`) are rendered.
+///
+/// Markdown has no native highlight syntax.
+///
+/// See also:
+/// - [HighlightInline] which carries the highlight color through the IR
+enum HighlightMode {
+  /// Drops highlighting, keeping only the inner text.
+  ///
+  /// The default; preserves plain-Markdown output.
+  none,
+
+  /// Wraps highlighted text in an HTML `<mark>` element.
+  ///
+  /// The OOXML highlight color name is not preserved. Use when your target
+  /// renderer supports inline HTML.
+  mark,
+}
+
+/// Controls how colored runs (`w:color`) are rendered.
+///
+/// Markdown has no native text-color syntax.
+///
+/// See also:
+/// - [ColorInline] which carries the color value through the IR
+enum TextColorMode {
+  /// Drops color, keeping only the inner text.
+  ///
+  /// The default; preserves plain-Markdown output.
+  none,
+
+  /// Wraps colored text in an inline HTML `<span style="color:#RRGGBB">`.
+  ///
+  /// Use when your target renderer supports inline HTML.
+  htmlSpan,
+}
+
+/// Controls how explicit page breaks (`w:br w:type="page"`) are rendered.
+///
+/// Markdown has no page concept. Only breaks that form their own paragraph are
+/// converted; a page break embedded in a paragraph with other content is kept
+/// as a line break and reported via a `page.break.midparagraph` warning.
+///
+/// See also:
+/// - [PageBreakBlock] which represents a page break in the IR
+enum PageBreakMode {
+  /// Drops page breaks entirely.
+  ///
+  /// The default; output is unaffected.
+  ignore,
+
+  /// Emits a thematic break (`---`) where the page break occurred.
+  thematicBreak,
+
+  /// Emits an inert HTML comment (`<!-- page break -->`) as a non-rendering
+  /// marker that survives round-trips.
+  htmlComment,
+}
+
+/// Controls how definition lists (`Definition Term` / `Definition` paragraph
+/// styles) are rendered.
+///
+/// Markdown has no native definition-list syntax, so the parser always builds a
+/// semantic [DefinitionListBlock] and this mode decides how it is presented.
+///
+/// See also:
+/// - [DefinitionListBlock] which carries the structure through the IR
+enum DefinitionListMode {
+  /// Emits an HTML `<dl><dt><dd>` block.
+  ///
+  /// The default. Renders in GitHub Flavored Markdown, CommonMark, and Pandoc,
+  /// so it is the safe cross-renderer choice for the GFM default flavor.
+  html,
+
+  /// Emits Pandoc definition-list syntax (the term, then `:   ` definitions).
+  ///
+  /// Use when the target is Pandoc (or a processor that supports its
+  /// `definition_lists` extension). Renders as literal text elsewhere.
+  pandoc,
+
+  /// Degrades to flat output: the term as its own paragraph followed by the
+  /// definition paragraphs.
+  ///
+  /// Use to opt out of grouping and keep plain, portable Markdown.
+  paragraphs,
+}
+
 /// Determines how unrecognized OOXML elements are handled during parsing.
 ///
 /// The DOCX format has many features (SmartArt, charts, embedded objects) that
@@ -140,6 +227,27 @@ enum OrderedListNumbering {
   alwaysOne,
 }
 
+/// Controls the symbol style used for ordered list markers.
+///
+/// Orthogonal to [OrderedListNumbering] (which controls the start number):
+/// this controls whether markers are Arabic numerals or the source DOCX's
+/// Roman/alphabetic style. Standard Markdown only displays decimals, so the
+/// non-decimal styles are meaningful for processors such as Pandoc.
+///
+/// See also:
+/// - [ListNumberFormat] which carries the per-list source style
+enum OrderedListMarker {
+  /// Always emit decimal markers (`1.`). Safe for GitHub Flavored Markdown.
+  decimal,
+
+  /// Emit the source format as Pandoc fancy-list markers (`i.`, `A.`, ...).
+  ///
+  /// Pair with [OrderedListNumbering.keep] so markers increment. Single
+  /// uppercase markers (`A.`, `I.`) are followed by two spaces, as Pandoc
+  /// requires.
+  preserveFormat,
+}
+
 /// Controls how DOCX line breaks (`w:br`) are rendered in Markdown.
 ///
 /// DOCX documents use explicit break elements for line breaks within paragraphs.
@@ -165,6 +273,29 @@ enum LineBreakStyle {
   /// May render as a soft break (space) in strict CommonMark renderers.
   /// Use only if your target renderer interprets newlines as line breaks.
   newline,
+}
+
+/// Controls how Word tracked changes (`w:ins` / `w:del`) are converted.
+///
+/// Word stores revisions inline. This policy decides whether the output reflects
+/// an accepted document, a rejected document, or surfaces deletions visibly.
+///
+/// See also:
+/// - [DocxToMarkdownConfig.trackChangesMode] where this is configured
+enum TrackChangesMode {
+  /// Accept all revisions: keep insertions inline, drop deletions.
+  ///
+  /// This is the default and reproduces a clean, accepted-revisions document.
+  acceptAll,
+
+  /// Keep insertions and render deletions as `~~strikethrough~~`.
+  ///
+  /// Use when reviewers need to see what was removed. Deletion text is read
+  /// from `w:delText`.
+  showDeletionsAsStrikethrough,
+
+  /// Reject revisions: drop insertions and restore deletions as plain text.
+  rejectChanges,
 }
 
 /// Controls how image dimensions are encoded in Markdown output.
@@ -194,6 +325,27 @@ enum ImageSizeMode {
   /// Supported by Pandoc and compatible processors. Enables precise control
   /// over image dimensions in PDF and HTML output.
   pandoc,
+}
+
+/// Controls whether document metadata (`docProps/core.xml` and
+/// `docProps/custom.xml`) is rendered ahead of the document body.
+///
+/// Parsing always populates [Document.metadata] regardless of this setting;
+/// this only controls rendering. The default preserves historical output.
+///
+/// See also:
+/// - [DocxToMarkdownConfig.metadataMode] where this is configured
+/// - [DocumentMetadata] for the parsed metadata model
+enum MetadataMode {
+  /// Do not render metadata. This is the default; Markdown output is unchanged.
+  none,
+
+  /// Render metadata as a Pandoc-style YAML front matter block before the
+  /// document body, but only when [Document.metadata] is non-empty.
+  ///
+  /// Keys use Pandoc-friendly names (e.g. `creator` becomes `author`,
+  /// `language` becomes `lang`); custom properties are nested under `custom`.
+  yamlFrontMatter,
 }
 
 /// Maps a Word paragraph style to a specific Markdown block type.
@@ -538,7 +690,12 @@ class DocxToMarkdownConfig {
     this.flavor = MarkdownFlavor.gfm,
     this.tableMode = TableMode.auto,
     this.underlineMode = UnderlineMode.html,
+    this.highlightMode = HighlightMode.none,
+    this.textColorMode = TextColorMode.none,
+    this.pageBreakMode = PageBreakMode.ignore,
+    this.definitionListMode = DefinitionListMode.html,
     this.unknownElementPolicy = UnknownElementPolicy.keepText,
+    this.metadataMode = MetadataMode.none,
 
     // What content to include
     this.extractImages = true,
@@ -553,12 +710,14 @@ class DocxToMarkdownConfig {
 
     // Lists
     this.orderedListNumbering = OrderedListNumbering.alwaysOne,
+    this.orderedListMarker = OrderedListMarker.decimal,
     List<String> bulletMarkers = const ['-', '*', '+'],
     this.listIndent = 2,
     this.tightLists = true,
 
     // Inline behavior
     this.lineBreakStyle = LineBreakStyle.hardBreak,
+    this.trackChangesMode = TrackChangesMode.acceptAll,
 
     // Code detection
     this.codeBlockStyleName = 'Code',
@@ -622,10 +781,38 @@ class DocxToMarkdownConfig {
   /// See [UnderlineMode] for options.
   final UnderlineMode underlineMode;
 
+  /// How to render highlighted text (`w:highlight`). Defaults to
+  /// [HighlightMode.none].
+  ///
+  /// See [HighlightMode] for options.
+  final HighlightMode highlightMode;
+
+  /// How to render colored text (`w:color`). Defaults to [TextColorMode.none].
+  ///
+  /// See [TextColorMode] for options.
+  final TextColorMode textColorMode;
+
+  /// How to render explicit page breaks (`w:br w:type="page"`). Defaults to
+  /// [PageBreakMode.ignore].
+  ///
+  /// See [PageBreakMode] for options.
+  final PageBreakMode pageBreakMode;
+
+  /// How to render definition lists. Defaults to [DefinitionListMode.html].
+  ///
+  /// See [DefinitionListMode] for options.
+  final DefinitionListMode definitionListMode;
+
   /// What to do with unrecognized OOXML elements. Defaults to [UnknownElementPolicy.keepText].
   ///
   /// See [UnknownElementPolicy] for options.
   final UnknownElementPolicy unknownElementPolicy;
+
+  /// Whether and how to render document metadata. Defaults to
+  /// [MetadataMode.none], which leaves Markdown output unchanged.
+  ///
+  /// See [MetadataMode] for options.
+  final MetadataMode metadataMode;
 
   // --------------------------------------------------------------------------
   // Content toggles
@@ -633,9 +820,9 @@ class DocxToMarkdownConfig {
 
   /// Whether to extract embedded images from the DOCX. Defaults to `true`.
   ///
-  /// When `true` and an `imageOutputDirectory` is passed to [DocxConverter.convert],
-  /// images are written to disk and referenced by relative path. When `false`,
-  /// images are omitted from output.
+  /// When `true`, images are included when the converter can map them to a
+  /// filename, URL, or asset sink result. When `false`, DOCX images are omitted
+  /// from output and no image export callback is invoked.
   final bool extractImages;
 
   /// Whether to include footnotes in the output. Defaults to `true`.
@@ -684,6 +871,12 @@ class DocxToMarkdownConfig {
   /// See [OrderedListNumbering] for options.
   final OrderedListNumbering orderedListNumbering;
 
+  /// The symbol style for ordered list markers. Defaults to [OrderedListMarker.decimal].
+  ///
+  /// See [OrderedListMarker] for options. Use [OrderedListMarker.preserveFormat]
+  /// (with [OrderedListNumbering.keep]) for Pandoc-style Roman/alphabetic markers.
+  final OrderedListMarker orderedListMarker;
+
   /// Markers for bullet lists, cycled by nesting depth.
   ///
   /// Defaults to `['-', '*', '+']`. Depth 0 uses `-`, depth 1 uses `*`,
@@ -709,6 +902,11 @@ class DocxToMarkdownConfig {
   ///
   /// See [LineBreakStyle] for options and their compatibility.
   final LineBreakStyle lineBreakStyle;
+
+  /// How to handle tracked changes (`w:ins` / `w:del`). Defaults to [TrackChangesMode.acceptAll].
+  ///
+  /// See [TrackChangesMode] for options.
+  final TrackChangesMode trackChangesMode;
 
   // --------------------------------------------------------------------------
   // Code detection
@@ -738,9 +936,9 @@ class DocxToMarkdownConfig {
 
   /// Maximum image width hint in pixels. Defaults to `0` (disabled).
   ///
-  /// When non-zero and [imageSizeMode] is not [ImageSizeMode.none], images
-  /// wider than this value include a width hint. The actual constraining
-  /// depends on the target renderer.
+  /// When non-zero, image output is constrained to this width. If
+  /// [imageSizeMode] is not [ImageSizeMode.none], the size is encoded with that
+  /// Markdown extension; otherwise an HTML `<img>` tag is emitted.
   final int maxImageWidth;
 
   /// How to encode image dimensions. Defaults to [ImageSizeMode.none].
@@ -792,7 +990,12 @@ class DocxToMarkdownConfig {
     MarkdownFlavor? flavor,
     TableMode? tableMode,
     UnderlineMode? underlineMode,
+    HighlightMode? highlightMode,
+    TextColorMode? textColorMode,
+    PageBreakMode? pageBreakMode,
+    DefinitionListMode? definitionListMode,
     UnknownElementPolicy? unknownElementPolicy,
+    MetadataMode? metadataMode,
     bool? extractImages,
     bool? includeFootnotes,
     bool? includeEndnotes,
@@ -801,10 +1004,12 @@ class DocxToMarkdownConfig {
     bool? preserveEmptyParagraphs,
     bool? trimTrailingWhitespace,
     OrderedListNumbering? orderedListNumbering,
+    OrderedListMarker? orderedListMarker,
     List<String>? bulletMarkers,
     int? listIndent,
     bool? tightLists,
     LineBreakStyle? lineBreakStyle,
+    TrackChangesMode? trackChangesMode,
     String? codeBlockStyleName,
     List<String>? monospaceFonts,
     bool? treatShadedRunsAsCode,
@@ -819,7 +1024,12 @@ class DocxToMarkdownConfig {
       flavor: flavor ?? this.flavor,
       tableMode: tableMode ?? this.tableMode,
       underlineMode: underlineMode ?? this.underlineMode,
+      highlightMode: highlightMode ?? this.highlightMode,
+      textColorMode: textColorMode ?? this.textColorMode,
+      pageBreakMode: pageBreakMode ?? this.pageBreakMode,
+      definitionListMode: definitionListMode ?? this.definitionListMode,
       unknownElementPolicy: unknownElementPolicy ?? this.unknownElementPolicy,
+      metadataMode: metadataMode ?? this.metadataMode,
       extractImages: extractImages ?? this.extractImages,
       includeFootnotes: includeFootnotes ?? this.includeFootnotes,
       includeEndnotes: includeEndnotes ?? this.includeEndnotes,
@@ -831,10 +1041,12 @@ class DocxToMarkdownConfig {
       trimTrailingWhitespace:
           trimTrailingWhitespace ?? this.trimTrailingWhitespace,
       orderedListNumbering: orderedListNumbering ?? this.orderedListNumbering,
+      orderedListMarker: orderedListMarker ?? this.orderedListMarker,
       bulletMarkers: bulletMarkers ?? this.bulletMarkers,
       listIndent: listIndent ?? this.listIndent,
       tightLists: tightLists ?? this.tightLists,
       lineBreakStyle: lineBreakStyle ?? this.lineBreakStyle,
+      trackChangesMode: trackChangesMode ?? this.trackChangesMode,
       codeBlockStyleName: codeBlockStyleName ?? this.codeBlockStyleName,
       monospaceFonts: monospaceFonts ?? this.monospaceFonts,
       treatShadedRunsAsCode:
@@ -856,7 +1068,12 @@ class DocxToMarkdownConfig {
         'flavor: $flavor, '
         'tableMode: $tableMode, '
         'underlineMode: $underlineMode, '
+        'highlightMode: $highlightMode, '
+        'textColorMode: $textColorMode, '
+        'pageBreakMode: $pageBreakMode, '
+        'definitionListMode: $definitionListMode, '
         'unknownElementPolicy: $unknownElementPolicy, '
+        'metadataMode: $metadataMode, '
         'extractImages: $extractImages, '
         'includeFootnotes: $includeFootnotes, '
         'includeEndnotes: $includeEndnotes, '
@@ -865,10 +1082,12 @@ class DocxToMarkdownConfig {
         'preserveEmptyParagraphs: $preserveEmptyParagraphs, '
         'trimTrailingWhitespace: $trimTrailingWhitespace, '
         'orderedListNumbering: $orderedListNumbering, '
+        'orderedListMarker: $orderedListMarker, '
         'bulletMarkers: $bulletMarkers, '
         'listIndent: $listIndent, '
         'tightLists: $tightLists, '
         'lineBreakStyle: $lineBreakStyle, '
+        'trackChangesMode: $trackChangesMode, '
         'codeBlockStyleName: $codeBlockStyleName, '
         'monospaceFonts: $monospaceFonts, '
         'treatShadedRunsAsCode: $treatShadedRunsAsCode, '

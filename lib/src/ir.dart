@@ -294,6 +294,193 @@ sealed class Inline extends DocNode {
 // Document root + Notes
 // ---------------------------------------------------------------------------
 
+/// Structured document metadata parsed from `docProps/core.xml` and
+/// `docProps/custom.xml`.
+///
+/// [DocumentMetadata] is a pure, immutable value type with deep value
+/// semantics. All string fields are `null` when absent (an empty OOXML element
+/// such as `<dc:title/>` is treated as absent, not as an empty string).
+///
+/// ### Field mapping
+///
+/// Core properties map to first-class fields; [creator] is Dublin Core's
+/// author. [keywords] is split from the comma/semicolon separated
+/// `cp:keywords`. Recognized-but-uncommon core elements are preserved in
+/// [extra] keyed by their local element name. Custom properties from
+/// `docProps/custom.xml` are kept in [custom] as name -> string value.
+///
+/// Producer statistics from `docProps/app.xml` (page/word counts) are
+/// intentionally excluded; they are frequently stale.
+///
+/// See also:
+/// - [Document.metadata] where this is attached
+/// - [MetadataMode] for how it is optionally rendered as YAML front matter
+@immutable
+final class DocumentMetadata {
+  /// Creates document metadata. All fields are optional; the no-argument form
+  /// produces [empty].
+  ///
+  /// [keywords], [custom], and [extra] are defensively copied into
+  /// unmodifiable views.
+  DocumentMetadata({
+    this.title,
+    this.creator,
+    this.subject,
+    this.description,
+    List<String> keywords = const [],
+    this.language,
+    this.category,
+    this.created,
+    this.modified,
+    this.lastModifiedBy,
+    this.revision,
+    Map<String, String> custom = const {},
+    Map<String, String> extra = const {},
+  }) : keywords = List.unmodifiable(keywords),
+       custom = Map.unmodifiable(custom),
+       extra = Map.unmodifiable(extra);
+
+  /// A canonical empty metadata instance (no fields set).
+  static final DocumentMetadata empty = DocumentMetadata();
+
+  /// `dc:title` - the document title.
+  final String? title;
+
+  /// `dc:creator` - the author. Rendered as Pandoc's `author` key.
+  final String? creator;
+
+  /// `dc:subject` - the document subject.
+  final String? subject;
+
+  /// `dc:description` - free-form description; may span multiple lines.
+  final String? description;
+
+  /// `cp:keywords` split into individual keywords (comma or semicolon
+  /// separated in the source).
+  final List<String> keywords;
+
+  /// `dc:language` - the document language. Rendered as Pandoc's `lang` key.
+  final String? language;
+
+  /// `cp:category` - the document category.
+  final String? category;
+
+  /// `dcterms:created` - creation timestamp, kept verbatim as a string.
+  final String? created;
+
+  /// `dcterms:modified` - last-modified timestamp, kept verbatim as a string.
+  final String? modified;
+
+  /// `cp:lastModifiedBy` - the last author to modify the document, if present.
+  final String? lastModifiedBy;
+
+  /// `cp:revision` - the revision number, if present.
+  final String? revision;
+
+  /// Custom properties from `docProps/custom.xml` as name -> string value.
+  ///
+  /// Values are the text of each property's first `vt:*` child (decoded), so a
+  /// `<vt:lpwstr/>` yields an empty string.
+  final Map<String, String> custom;
+
+  /// Recognized core properties without a first-class field, keyed by the
+  /// element's local name (e.g. `contentStatus`). Preserved so robust metadata
+  /// is never silently dropped.
+  final Map<String, String> extra;
+
+  /// Whether no metadata at all is present.
+  bool get isEmpty =>
+      title == null &&
+      creator == null &&
+      subject == null &&
+      description == null &&
+      keywords.isEmpty &&
+      language == null &&
+      category == null &&
+      created == null &&
+      modified == null &&
+      lastModifiedBy == null &&
+      revision == null &&
+      custom.isEmpty &&
+      extra.isEmpty;
+
+  /// Whether any metadata field is present.
+  bool get isNotEmpty => !isEmpty;
+
+  /// Creates a copy with the given fields replaced.
+  DocumentMetadata copyWith({
+    String? title,
+    String? creator,
+    String? subject,
+    String? description,
+    List<String>? keywords,
+    String? language,
+    String? category,
+    String? created,
+    String? modified,
+    String? lastModifiedBy,
+    String? revision,
+    Map<String, String>? custom,
+    Map<String, String>? extra,
+  }) {
+    return DocumentMetadata(
+      title: title ?? this.title,
+      creator: creator ?? this.creator,
+      subject: subject ?? this.subject,
+      description: description ?? this.description,
+      keywords: keywords ?? this.keywords,
+      language: language ?? this.language,
+      category: category ?? this.category,
+      created: created ?? this.created,
+      modified: modified ?? this.modified,
+      lastModifiedBy: lastModifiedBy ?? this.lastModifiedBy,
+      revision: revision ?? this.revision,
+      custom: custom ?? this.custom,
+      extra: extra ?? this.extra,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is DocumentMetadata &&
+          other.title == title &&
+          other.creator == creator &&
+          other.subject == subject &&
+          other.description == description &&
+          _deepEquals(other.keywords, keywords) &&
+          other.language == language &&
+          other.category == category &&
+          other.created == created &&
+          other.modified == modified &&
+          other.lastModifiedBy == lastModifiedBy &&
+          other.revision == revision &&
+          _deepEquals(other.custom, custom) &&
+          _deepEquals(other.extra, extra));
+
+  @override
+  int get hashCode => Object.hash(
+    title,
+    creator,
+    subject,
+    description,
+    _deepHash(keywords),
+    language,
+    category,
+    created,
+    modified,
+    lastModifiedBy,
+    revision,
+    _deepHash(custom),
+    _deepHash(extra),
+  );
+
+  @override
+  String toString() =>
+      'DocumentMetadata(title: $title, creator: $creator, '
+      'keywords: ${keywords.length}, custom: ${custom.length})';
+}
+
 /// The root IR node representing a complete DOCX document.
 ///
 /// [Document] contains all block-level content ([blocks]), footnote definitions
@@ -328,10 +515,12 @@ final class Document extends DocNode {
     required Iterable<Block> blocks,
     Map<String, FootnoteDefinition> footnotes = const {},
     Iterable<DocWarning> warnings = const [],
+    DocumentMetadata? metadata,
     super.meta,
   }) : blocks = _freezeList(blocks),
        footnotes = Map.unmodifiable(footnotes),
-       warnings = _freezeList(warnings);
+       warnings = _freezeList(warnings),
+       metadata = metadata ?? DocumentMetadata.empty;
 
   /// The block-level content of the document in order.
   ///
@@ -350,20 +539,26 @@ final class Document extends DocNode {
   /// tables that were downgraded. Check after conversion to assess fidelity.
   final List<DocWarning> warnings;
 
+  /// Structured metadata parsed from `docProps/core.xml` and
+  /// `docProps/custom.xml`. [DocumentMetadata.empty] when none is present.
+  final DocumentMetadata metadata;
+
   @override
-  List<Object?> get props => <Object?>[blocks, footnotes];
+  List<Object?> get props => <Object?>[blocks, footnotes, metadata];
 
   /// Creates a copy with the given fields replaced.
   Document copyWith({
     Iterable<Block>? blocks,
     Map<String, FootnoteDefinition>? footnotes,
     Iterable<DocWarning>? warnings,
+    DocumentMetadata? metadata,
     NodeMeta? meta,
   }) {
     return Document(
       blocks: blocks ?? this.blocks,
       footnotes: footnotes ?? this.footnotes,
       warnings: warnings ?? this.warnings,
+      metadata: metadata ?? this.metadata,
       meta: meta ?? this.meta,
     );
   }
@@ -541,6 +736,34 @@ final class QuoteBlock extends Block {
   String toString() => 'QuoteBlock(blocks: ${blocks.length})';
 }
 
+/// The numbering symbol style for an ordered [ListBlock].
+///
+/// Mirrors the OOXML `w:numFmt` values that map to ordered lists. Bullet/none
+/// formats are represented by [ListBlock.ordered] being `false`, so this enum
+/// only enumerates ordered styles. Markdown renderers display ordered lists as
+/// decimals natively; the non-decimal values are meaningful for processors such
+/// as Pandoc that support fancy lists.
+///
+/// See also:
+/// - [ListBlock.numberFormat] where this is stored
+/// - [DocxToMarkdownConfig.orderedListMarker] for how it is rendered
+enum ListNumberFormat {
+  /// Arabic numerals: 1, 2, 3.
+  decimal,
+
+  /// Lowercase letters: a, b, c.
+  lowerAlpha,
+
+  /// Uppercase letters: A, B, C.
+  upperAlpha,
+
+  /// Lowercase Roman numerals: i, ii, iii.
+  lowerRoman,
+
+  /// Uppercase Roman numerals: I, II, III.
+  upperRoman,
+}
+
 /// Controls spacing between list items.
 ///
 /// Used by [ListBlock.tightness] to determine whether to insert blank lines
@@ -582,6 +805,7 @@ final class ListBlock extends Block {
     required this.ordered,
     required Iterable<ListItem> items,
     this.start = 1,
+    this.numberFormat = ListNumberFormat.decimal,
     this.tightness = ListTightness.auto,
     super.meta,
   }) : assert(start >= 1),
@@ -591,6 +815,12 @@ final class ListBlock extends Block {
   ///
   /// When `true`, items are numbered. When `false`, items use bullet markers.
   final bool ordered;
+
+  /// The numbering symbol style for ordered lists. Ignored when [ordered] is `false`.
+  ///
+  /// Defaults to [ListNumberFormat.decimal]. See
+  /// [DocxToMarkdownConfig.orderedListMarker] for how it is rendered per target.
+  final ListNumberFormat numberFormat;
 
   /// The starting number for ordered lists.
   ///
@@ -608,11 +838,17 @@ final class ListBlock extends Block {
   final List<ListItem> items;
 
   @override
-  List<Object?> get props => <Object?>[ordered, start, tightness, items];
+  List<Object?> get props => <Object?>[
+    ordered,
+    start,
+    numberFormat,
+    tightness,
+    items,
+  ];
 
   @override
   String toString() =>
-      'ListBlock(ordered: $ordered, start: $start, items: ${items.length}, tightness: $tightness)';
+      'ListBlock(ordered: $ordered, start: $start, numberFormat: $numberFormat, items: ${items.length}, tightness: $tightness)';
 }
 
 /// A single item in a list.
@@ -625,7 +861,7 @@ final class ListBlock extends Block {
 @immutable
 final class ListItem extends DocNode {
   /// Creates a list item with the given content blocks.
-  ListItem({required Iterable<Block> blocks, super.meta})
+  ListItem({required Iterable<Block> blocks, this.checked, super.meta})
     : blocks = _freezeList(blocks);
 
   /// The content of this list item.
@@ -634,11 +870,88 @@ final class ListItem extends DocNode {
   /// including nested [ListBlock]s.
   final List<Block> blocks;
 
-  @override
-  List<Object?> get props => <Object?>[blocks];
+  /// Task-list checkbox state when the DOCX bullet marker is a checkbox.
+  ///
+  /// `true` renders as checked, `false` as unchecked, and `null` means this is
+  /// an ordinary list item.
+  final bool? checked;
 
   @override
-  String toString() => 'ListItem(blocks: ${blocks.length})';
+  List<Object?> get props => <Object?>[blocks, checked];
+
+  @override
+  String toString() => 'ListItem(blocks: ${blocks.length}, checked: $checked)';
+}
+
+/// A definition list (description list) mapping terms to their definitions.
+///
+/// [DefinitionListBlock] represents Word/Pandoc definition lists: a sequence of
+/// [DefinitionListItem]s, each pairing a term with its definition body. In
+/// OOXML these come from paragraphs styled "Definition Term" and "Definition"
+/// (Pandoc's reference style names); the [StyleRegistry] detects them.
+///
+/// Markdown has no native definition-list syntax, so rendering depends on
+/// [DocxToMarkdownConfig.definitionListMode]; by default an HTML `<dl>` is
+/// emitted, which renders in GitHub Flavored Markdown, CommonMark, and Pandoc.
+///
+/// See also:
+/// - [DefinitionListItem] for a single term/definition pair
+/// - [DocxToMarkdownConfig.definitionListMode] for rendering options
+@immutable
+final class DefinitionListBlock extends Block {
+  /// Creates a definition list from the given items.
+  DefinitionListBlock({required Iterable<DefinitionListItem> items, super.meta})
+    : items = _freezeList(items);
+
+  /// The term/definition pairs in this list, in document order.
+  final List<DefinitionListItem> items;
+
+  @override
+  List<Object?> get props => <Object?>[items];
+
+  @override
+  String toString() => 'DefinitionListBlock(items: ${items.length})';
+}
+
+/// A single entry in a [DefinitionListBlock]: a term and its definition body.
+///
+/// The [term] holds the inline content of the "Definition Term" paragraph (the
+/// `<dt>`). The [definitions] hold the block(s) of the definition body (the
+/// `<dd>`), gathered from the consecutive "Definition" paragraphs that follow
+/// the term. A term with no following definition keeps an empty [definitions]
+/// list rather than being dropped.
+///
+/// Like [ListItem], this is a [DocNode] (not a [Block]); it only appears inside
+/// a [DefinitionListBlock]. Source style metadata (for example `styleId`) is
+/// carried on [meta] for hooks.
+///
+/// See also:
+/// - [DefinitionListBlock] the container for these items
+@immutable
+final class DefinitionListItem extends DocNode {
+  /// Creates a definition-list item from a term and its definition body blocks.
+  DefinitionListItem({
+    required Iterable<Inline> term,
+    required Iterable<Block> definitions,
+    super.meta,
+  }) : term = _freezeList(term),
+       definitions = _freezeList(definitions);
+
+  /// The inline content of the term (rendered as the `<dt>`).
+  final List<Inline> term;
+
+  /// The definition body blocks (rendered as the `<dd>`), in document order.
+  ///
+  /// Usually [ParagraphBlock]s; may contain any block type. Empty when a term
+  /// has no following definition.
+  final List<Block> definitions;
+
+  @override
+  List<Object?> get props => <Object?>[term, definitions];
+
+  @override
+  String toString() =>
+      'DefinitionListItem(term: ${term.length}, definitions: ${definitions.length})';
 }
 
 /// A table with rows, cells, and optional column alignments.
@@ -699,6 +1012,24 @@ final class HorizontalRuleBlock extends Block {
 
   @override
   String toString() => 'HorizontalRuleBlock()';
+}
+
+/// An explicit page break from the source document.
+///
+/// Word stores these as `<w:br w:type="page"/>`. Markdown has no page concept,
+/// so rendering depends on [DocxToMarkdownConfig.pageBreakMode]; by default
+/// page breaks are dropped. Distinct from [HorizontalRuleBlock] so a real
+/// thematic break stays distinguishable.
+@immutable
+final class PageBreakBlock extends Block {
+  /// Creates a page break.
+  const PageBreakBlock({super.meta});
+
+  @override
+  List<Object?> get props => const <Object?>[];
+
+  @override
+  String toString() => 'PageBreakBlock()';
 }
 
 /// Raw HTML to be passed through to output.
@@ -767,6 +1098,8 @@ final class ImageBlock extends Block {
     required this.src,
     required this.alt,
     this.title,
+    this.widthPx,
+    this.heightPx,
     super.meta,
   });
 
@@ -781,11 +1114,18 @@ final class ImageBlock extends Block {
   /// Optional title (appears on hover in some renderers).
   final String? title;
 
-  @override
-  List<Object?> get props => <Object?>[src, alt, title];
+  /// Image width in pixels, when the DOCX stores a drawing extent.
+  final int? widthPx;
+
+  /// Image height in pixels, when the DOCX stores a drawing extent.
+  final int? heightPx;
 
   @override
-  String toString() => 'ImageBlock(src: $src, alt: $alt)';
+  List<Object?> get props => <Object?>[src, alt, title, widthPx, heightPx];
+
+  @override
+  String toString() =>
+      'ImageBlock(src: $src, alt: $alt, size: ${widthPx}x$heightPx)';
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +1266,64 @@ final class UnderlineInline extends Inline {
   String toString() => 'UnderlineInline(children: ${children.length})';
 }
 
+/// Highlighted text (Word `w:highlight`).
+///
+/// Markdown has no native highlight syntax, so rendering depends on
+/// [DocxToMarkdownConfig.highlightMode]; by default highlighting is dropped and
+/// only the inner text is kept. [color] is the OOXML highlight name such as
+/// `"yellow"` or `"green"`.
+///
+/// See also:
+/// - [HighlightMode] for rendering options
+@immutable
+final class HighlightInline extends Inline {
+  /// Creates a highlight span with the given children and OOXML color name.
+  HighlightInline(Iterable<Inline> children, {required this.color, super.meta})
+    : children = _freezeList(children);
+
+  /// The highlighted content.
+  final List<Inline> children;
+
+  /// The OOXML highlight color name (e.g. `"yellow"`).
+  final String color;
+
+  @override
+  List<Object?> get props => <Object?>[color, children];
+
+  @override
+  String toString() =>
+      'HighlightInline(color: $color, children: ${children.length})';
+}
+
+/// Colored text (Word `w:color`).
+///
+/// Markdown has no native text-color syntax, so rendering depends on
+/// [DocxToMarkdownConfig.textColorMode]; by default color is dropped and only
+/// the inner text is kept. [color] is the OOXML color value: a hex string
+/// without the leading `#` (e.g. `"FF0000"`).
+///
+/// See also:
+/// - [TextColorMode] for rendering options
+@immutable
+final class ColorInline extends Inline {
+  /// Creates a colored span with the given children and OOXML color value.
+  ColorInline(Iterable<Inline> children, {required this.color, super.meta})
+    : children = _freezeList(children);
+
+  /// The colored content.
+  final List<Inline> children;
+
+  /// The OOXML color value: a hex string without `#` (e.g. `"FF0000"`).
+  final String color;
+
+  @override
+  List<Object?> get props => <Object?>[color, children];
+
+  @override
+  String toString() =>
+      'ColorInline(color: $color, children: ${children.length})';
+}
+
 /// Inline code (monospace text).
 ///
 /// Renders as `` `code` `` in Markdown.
@@ -995,6 +1393,8 @@ final class ImageInline extends Inline {
     required this.src,
     required this.alt,
     this.title,
+    this.widthPx,
+    this.heightPx,
     super.meta,
   });
 
@@ -1007,11 +1407,18 @@ final class ImageInline extends Inline {
   /// Optional title (appears on hover in some renderers).
   final String? title;
 
-  @override
-  List<Object?> get props => <Object?>[src, alt, title];
+  /// Image width in pixels, when the DOCX stores a drawing extent.
+  final int? widthPx;
+
+  /// Image height in pixels, when the DOCX stores a drawing extent.
+  final int? heightPx;
 
   @override
-  String toString() => 'ImageInline(src: $src, alt: $alt)';
+  List<Object?> get props => <Object?>[src, alt, title, widthPx, heightPx];
+
+  @override
+  String toString() =>
+      'ImageInline(src: $src, alt: $alt, size: ${widthPx}x$heightPx)';
 }
 
 /// A reference to a footnote definition.
@@ -1288,6 +1695,12 @@ extension InlinePlainText on Iterable<Inline> {
           node.children.forEach(walk);
           return;
         case SubInline():
+          node.children.forEach(walk);
+          return;
+        case HighlightInline():
+          node.children.forEach(walk);
+          return;
+        case ColorInline():
           node.children.forEach(walk);
           return;
         case LinkInline():

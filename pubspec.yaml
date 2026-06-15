@@ -1,6 +1,8 @@
 name: docx_to_markdown
-description: Word DOCX to Markdown converter for Dart.
-version: 0.0.1
+description: >-
+  Convert Word .docx (OOXML) files to GitHub-Flavored or CommonMark Markdown in
+  pure Dart, with images, tables, lists, footnotes, math, and extensible hooks.
+version: 0.1.0
 homepage: https://github.com/omar-hanafy/docx_to_markdown
 repository: https://github.com/omar-hanafy/docx_to_markdown
 issue_tracker: https://github.com/omar-hanafy/docx_to_markdown/issues
@@ -14,16 +16,25 @@ topics:
   - word
   - documents
 
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
+
 environment:
-  sdk: ^3.10.4
+  sdk: ^3.12.0
 
 dependencies:
-  archive: ^4.0.7
+  archive: ^4.0.9
   collection: ^1.19.1
-  meta: ^1.10.0
+  meta: ^1.18.3
   path: ^1.9.1
-  xml: ^6.6.1
+  xml: ^7.0.1
 
 dev_dependencies:
-  lints: ^6.0.0
-  test: ^1.28.0
+  coverage: ^1.15.1
+  lints: ^6.1.0
+  test: ^1.31.1

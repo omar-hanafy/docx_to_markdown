@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 
 import 'package:docx_to_markdown/docx_to_markdown.dart';
-import 'package:docx_to_markdown/src/ir.dart';
 import 'package:docx_to_markdown/src/ooxml_package.dart';
 import 'package:docx_to_markdown/src/parser.dart';
 import 'package:docx_to_markdown/src/styles.dart';
@@ -36,6 +35,37 @@ Future<Document> parseDocument(
 }
 
 void main() {
+  group('DocxParser metadata', () {
+    test('parseMainDocument attaches parsed document metadata', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Body')),
+        coreXml:
+            '<cp:coreProperties '
+            'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:title>Doc</dc:title><dc:creator>Jane</dc:creator>'
+            '</cp:coreProperties>',
+        customXml:
+            '<Properties '
+            'xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" '
+            'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            '<property fmtid="{x}" pid="2" name="Team">'
+            '<vt:lpwstr>Platform</vt:lpwstr></property></Properties>',
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.metadata.title, 'Doc');
+      expect(doc.metadata.creator, 'Jane');
+      expect(doc.metadata.custom['Team'], 'Platform');
+    });
+
+    test('document without docProps has empty metadata', () async {
+      final doc = await parseDocument(
+        buildDocxBytes(documentXml: docXmlWithBody(wP(text: 'Body'))),
+      );
+      expect(doc.metadata.isEmpty, isTrue);
+    });
+  });
+
   group('DocxConverter input validation', () {
     test('empty bytes throws DocxPackageException', () async {
       final converter = DocxConverter(Uint8List(0));
@@ -44,6 +74,13 @@ void main() {
 
     test('invalid signature throws DocxPackageException', () async {
       final converter = DocxConverter(Uint8List.fromList([0x00, 0x01, 0x02]));
+      expect(converter.convert(), throwsA(isA<DocxPackageException>()));
+    });
+
+    test('corrupt zip throws DocxPackageException', () async {
+      final converter = DocxConverter(
+        Uint8List.fromList([0x50, 0x4B, 0x03, 0x04, 0x00]),
+      );
       expect(converter.convert(), throwsA(isA<DocxPackageException>()));
     });
   });
@@ -73,6 +110,24 @@ void main() {
       );
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '# Title');
+    });
+
+    test('renders Block Text paragraph style as quote', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            styleId: 'BlockText',
+            innerXml: wR(text: 'Quoted'),
+          ),
+        ),
+        stylesXml: stylesXml(
+          styleId: 'BlockText',
+          styleName: 'Block Text',
+          outlineLevel: null,
+        ),
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '> Quoted');
     });
 
     test('coalesces code style paragraphs into fenced code block', () async {
@@ -186,6 +241,97 @@ void main() {
       expect(markdown.trim(), '1. A\n1. B');
     });
 
+    test('renders checkbox bullets as GFM task list items', () async {
+      const numbering =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="☐"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="☒"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="3">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val=" "/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+  <w:num w:numId="3"><w:abstractNumId w:val="3"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          innerXml: wR(text: 'Todo'),
+        ),
+        wP(
+          numId: '2',
+          innerXml: wR(text: 'Done'),
+        ),
+        wP(
+          numId: '3',
+          innerXml: wR(text: 'Details'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numbering,
+      );
+
+      final doc = await parseDocument(bytes);
+      final lists = doc.blocks.whereType<ListBlock>().toList();
+      expect(lists, hasLength(1));
+      expect(lists.single.items[0].checked, isFalse);
+      expect(lists.single.items[1].checked, isTrue);
+      expect(lists.single.items[1].blocks, hasLength(2));
+
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '- [ ] Todo\n- [x] Done\n  Details');
+    });
+
+    test('blank list marker continues the current list item', () async {
+      const numbering =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val=" "/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Parent'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 1,
+          innerXml: wR(text: 'Child'),
+        ),
+        wP(
+          numId: '2',
+          ilvl: 1,
+          innerXml: wR(text: 'Continuation'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numbering,
+      );
+
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(tightLists: false),
+      ).convert();
+
+      expect(markdown.trimRight(), '- Parent\n  * Child\n    Continuation');
+    });
+
     test('continues list item when paragraph is indented', () async {
       final body = [
         wP(
@@ -229,6 +375,133 @@ void main() {
       expect(markdown.trim(), '3. A');
     });
 
+    test('groups consecutive same-numId items into one list', () async {
+      // Regression: the abstract w:start must not split a continuing list.
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Foo'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Bar'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'Baz'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(numId: '1', numFmt: 'decimal', start: 1),
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.length, 1);
+      final list = doc.blocks.first as ListBlock;
+      expect(list.items.length, 3);
+    });
+
+    test('a non-list paragraph splits adjacent same-numId lists', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(text: 'Interruption'),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(numId: '1', numFmt: 'decimal', start: 1),
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.length, 3);
+      expect(doc.blocks.whereType<ListBlock>().length, 2);
+    });
+
+    test('different numIds stay separate lists', () async {
+      const twoNums = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '2',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: twoNums,
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.whereType<ListBlock>().length, 2);
+    });
+
+    test('instance startOverride wins over abstract start', () async {
+      final body = wP(
+        numId: '1',
+        ilvl: 0,
+        innerXml: wR(text: 'A'),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'decimal',
+          start: 5,
+          startOverride: 3,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), '3. A');
+    });
+
+    test('abstract start is used when there is no override', () async {
+      final body = wP(
+        numId: '1',
+        ilvl: 0,
+        innerXml: wR(text: 'A'),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(numId: '1', numFmt: 'decimal', start: 5),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), '5. A');
+    });
+
     test('parses hyperlinks via relationships', () async {
       final body = wP(
         innerXml: wHyperlink(
@@ -251,7 +524,7 @@ void main() {
       expect(markdown.trim(), '[Link](https://example.com)');
     });
 
-    test('parses drawings as images', () async {
+    test('reads image alt text from docPr descr', () async {
       final body = wP(
         innerXml: wR(
           innerXml: wDrawingImage(embedId: 'rId2', descr: 'AltText'),
@@ -268,7 +541,420 @@ void main() {
         ],
       );
       final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '![AltText](image1.png)');
+    });
+
+    test('reads image title from docPr', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(
+            embedId: 'rId2',
+            descr: 'AltText',
+            title: 'My Title',
+          ),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '![AltText](image1.png "My Title")');
+    });
+
+    test('uses drawing extent for obsidian image size hints', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(
+            embedId: 'rId2',
+            descr: 'AltText',
+            extentCx: 1828800,
+            extentCy: 914400,
+          ),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(imageSizeMode: ImageSizeMode.obsidian),
+      ).convert();
+
+      expect(markdown.trim(), '![AltText](image1.png =192x96)');
+    });
+
+    test(
+      'uses constrained drawing extent for pandoc image size hints',
+      () async {
+        final body = wP(
+          innerXml: wR(
+            innerXml: wDrawingImage(
+              embedId: 'rId2',
+              descr: 'AltText',
+              extentCx: 1828800,
+              extentCy: 914400,
+            ),
+          ),
+        );
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          documentRels: const [
+            DocxRel(
+              id: 'rId2',
+              type: DocxRelTypes.image,
+              target: 'media/image1.png',
+            ),
+          ],
+        );
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(
+            imageSizeMode: ImageSizeMode.pandoc,
+            maxImageWidth: 96,
+          ),
+        ).convert();
+
+        expect(
+          markdown.trim(),
+          '![AltText](image1.png){ width=96px height=48px }',
+        );
+      },
+    );
+
+    test('falls back to generic image alt when docPr descr is empty', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(embedId: 'rId2', descr: ''),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '![Image](image1.png)');
+    });
+
+    test('renders hyperlink wrapping an image', () async {
+      final body = wP(
+        innerXml: wHyperlink(
+          rid: 'rId1',
+          innerXml: wR(
+            innerXml: wDrawingImage(embedId: 'rId2', descr: 'Linked image'),
+          ),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId1',
+            type: DocxRelTypes.hyperlink,
+            target: 'https://example.com',
+            external: true,
+          ),
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(
+        markdown.trim(),
+        '[![Linked image](image1.png)](https://example.com)',
+      );
+    });
+
+    test('preserves text around an image in the same run', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml:
+              '${wT("Before ")}'
+              '${wDrawingImage(embedId: "rId2", descr: "Inline image")}'
+              '${wT(" after")}',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(markdown.trim(), 'Before ![Inline image](image1.png) after');
+    });
+
+    test('imageAssetSink maps embedded images', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(embedId: 'rId2', descr: 'AltText'),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+
+      final assets = <DocxImageAsset>[];
+      final markdown = await DocxConverter(bytes).convert(
+        imageAssetSink: (asset) {
+          assets.add(asset);
+          return 'assets/${asset.suggestedFilename}';
+        },
+      );
+
+      expect(markdown.trim(), '![AltText](assets/image1_1.png)');
+      expect(assets, hasLength(1));
+      expect(assets.single.partPath, 'word/media/image1.png');
+      expect(assets.single.suggestedFilename, 'image1_1.png');
+      expect(assets.single.contentType, 'image/png');
+      expect(assets.single.bytes, [1, 2, 3]);
+    });
+
+    test('imageAssetSink can skip an image', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml:
+              '${wT("Before ")}'
+              '${wDrawingImage(embedId: "rId2", descr: "Inline image")}'
+              '${wT(" after")}',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+
+      final markdown = await DocxConverter(
+        bytes,
+      ).convert(imageAssetSink: (_) => null);
+
+      expect(markdown.trim(), 'Before  after');
+    });
+
+    test('extractImages false skips images and does not call sink', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml:
+              '${wT("Before ")}'
+              '${wDrawingImage(embedId: "rId2", descr: "Inline image")}'
+              '${wT(" after")}',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+      var called = false;
+
+      final markdown =
+          await DocxConverter(
+            bytes,
+            config: DocxToMarkdownConfig(extractImages: false),
+          ).convert(
+            imageAssetSink: (_) {
+              called = true;
+              return 'image.png';
+            },
+          );
+
+      expect(called, isFalse);
+      expect(markdown.trim(), 'Before  after');
+    });
+
+    test('imageAssetSink errors are propagated', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(embedId: 'rId2', descr: 'AltText'),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+
+      expect(
+        DocxConverter(
+          bytes,
+        ).convert(imageAssetSink: (_) => throw StateError('upload failed')),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('imageOutputDirectory and imageAssetSink are mutually exclusive', () {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Hello')),
+      );
+
+      expect(
+        DocxConverter(bytes).convert(
+          imageOutputDirectory: 'images',
+          imageAssetSink: (_) => 'image.png',
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('parses w:highlight and renders as mark when enabled', () async {
+      final body = wP(
+        innerXml: wR(text: 'x', rPrXml: '<w:highlight w:val="yellow"/>'),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(highlightMode: HighlightMode.mark),
+      ).convert();
+      expect(markdown.trim(), '<mark>x</mark>');
+    });
+
+    test('drops highlight by default', () async {
+      final body = wP(
+        innerXml: wR(text: 'x', rPrXml: '<w:highlight w:val="yellow"/>'),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'x');
+    });
+
+    test('parses w:color and renders as span when enabled', () async {
+      final body = wP(
+        innerXml: wR(text: 'x', rPrXml: '<w:color w:val="FF0000"/>'),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(textColorMode: TextColorMode.htmlSpan),
+      ).convert();
+      expect(markdown.trim(), '<span style="color:#FF0000">x</span>');
+    });
+
+    test('shaded run takes code precedence over highlight', () async {
+      final body = wP(
+        innerXml: wR(
+          text: 'x',
+          rPrXml:
+              '<w:highlight w:val="yellow"/>'
+              '<w:shd w:val="clear" w:fill="DDDDDD"/>',
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          highlightMode: HighlightMode.mark,
+          treatShadedRunsAsCode: true,
+        ),
+      ).convert();
+      expect(markdown.trim(), '`x`');
+    });
+
+    test(
+      'page-break-only paragraph becomes a page break when enabled',
+      () async {
+        final body = [
+          wP(text: 'before'),
+          wP(innerXml: '<w:r><w:br w:type="page"/></w:r>'),
+          wP(text: 'after'),
+        ].join();
+        final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(
+            pageBreakMode: PageBreakMode.thematicBreak,
+          ),
+        ).convert();
+        expect(markdown.trim(), 'before\n\n---\n\nafter');
+      },
+    );
+
+    test('page-break-only paragraph can render as an HTML comment', () async {
+      final body = [
+        wP(text: 'before'),
+        wP(innerXml: '<w:r><w:br w:type="page"/></w:r>'),
+        wP(text: 'after'),
+      ].join();
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(pageBreakMode: PageBreakMode.htmlComment),
+      ).convert();
+      expect(markdown.trim(), 'before\n\n<!-- page break -->\n\nafter');
+    });
+
+    test('page breaks are ignored by default', () async {
+      final body = [
+        wP(text: 'before'),
+        wP(innerXml: '<w:r><w:br w:type="page"/></w:r>'),
+        wP(text: 'after'),
+      ].join();
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, isNot(contains('---')));
+      expect(markdown.trim(), 'before\n\nafter');
     });
 
     test('drawing with missing rel falls back to text', () async {
@@ -294,6 +980,28 @@ void main() {
       );
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '![Image](vml.png)');
+    });
+
+    test('extractImages false skips VML images', () async {
+      final body = wP(
+        innerXml:
+            '<w:r>${wT("Before ")}${vmlImage("rId5")}${wT(" after")}</w:r>',
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId5',
+            type: DocxRelTypes.image,
+            target: 'media/vml.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(extractImages: false),
+      ).convert();
+      expect(markdown.trim(), 'Before  after');
     });
 
     test('VML image with missing rel is ignored', () async {
@@ -354,6 +1062,163 @@ void main() {
       expect(markdown.trim(), '[Link](https://example.com)');
     });
 
+    test('parses REF cross-reference field as anchor link', () async {
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref12345"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>'
+          '${wP(innerXml: ['<w:r><w:fldChar w:fldCharType="begin"/></w:r>', '<w:r><w:instrText xml:space="preserve">REF _Ref12345 \\h</w:instrText></w:r>', '<w:r><w:fldChar w:fldCharType="separate"/></w:r>', '<w:r><w:t>See section</w:t></w:r>', '<w:r><w:fldChar w:fldCharType="end"/></w:r>'].join())}';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, contains('[See section](#_Ref12345)'));
+    });
+
+    test('parses fldSimple REF as anchor link', () async {
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref99"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>'
+          '${wP(
+            innerXml: wFldSimple(
+              instr: 'REF _Ref99 \\h',
+              innerXml: wR(text: 'X'),
+            ),
+          )}';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, contains('[X](#_Ref99)'));
+    });
+
+    test('parses fldSimple PAGEREF as anchor link', () async {
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref77"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>'
+          '${wP(
+            innerXml: wFldSimple(
+              instr: 'PAGEREF _Ref77 \\h',
+              innerXml: wR(text: '7'),
+            ),
+          )}';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, contains('[7](#_Ref77)'));
+    });
+
+    test('unresolved REF field preserves display text and warns', () async {
+      final body = wP(
+        innerXml: wFldSimple(
+          instr: 'REF MissingBookmark \\h',
+          innerXml: wR(text: 'See target'),
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks.single, isA<ParagraphBlock>());
+      final para = doc.blocks.single as ParagraphBlock;
+      expect(para.inlines.toPlainText(), 'See target');
+      expect(
+        doc.warnings,
+        contains(
+          isA<DocWarning>().having(
+            (warning) => warning.code,
+            'code',
+            'fieldcode.unresolved',
+          ),
+        ),
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'See target');
+    });
+
+    test('PAGE field falls back to display text', () async {
+      final body = wP(
+        innerXml: wFldSimple(
+          instr: 'PAGE',
+          innerXml: wR(text: '7'),
+        ),
+      );
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '7');
+    });
+
+    test('navigable underscore bookmark emits anchor', () async {
+      final body =
+          '<w:p><w:bookmarkStart w:name="_Ref12345"/>'
+          '<w:r><w:t>Target</w:t></w:r></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains('<a id="_Ref12345"></a>'), isTrue);
+    });
+
+    test('body-level bookmarkStart emits block anchor', () async {
+      final body =
+          '<w:p><w:hyperlink w:anchor="TargetAnchor">${wR(text: "Jump")}</w:hyperlink></w:p>'
+          '<w:bookmarkStart w:id="1" w:name="TargetAnchor"/>'
+          '${wP(
+            styleId: "Heading1",
+            innerXml: wR(text: "Target"),
+          )}'
+          '<w:bookmarkEnd w:id="1"/>';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: stylesXml(
+          styleId: 'Heading1',
+          styleName: 'Heading 1',
+          outlineLevel: 0,
+        ),
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(
+        markdown.trim(),
+        '[Jump](#TargetAnchor)\n\n<a id="TargetAnchor"></a>\n\n# Target',
+      );
+    });
+
+    test(
+      'body-level bookmark between same-level bullets does not split list',
+      () async {
+        final body =
+            '<w:p><w:hyperlink w:anchor="refs">${wR(text: "Jump")}</w:hyperlink></w:p>'
+            '${wP(
+              numId: '1',
+              innerXml: wR(text: 'one'),
+            )}'
+            '${wP(
+              numId: '2',
+              innerXml: wR(text: 'two'),
+            )}'
+            '<w:bookmarkStart w:id="9" w:name="refs"/>'
+            '${wP(
+              numId: '1',
+              innerXml: wR(text: 'three'),
+            )}'
+            '<w:bookmarkEnd w:id="9"/>';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          numberingXml:
+              '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val=" "/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+</w:numbering>''',
+        );
+
+        final markdown = await DocxConverter(bytes).convert();
+
+        expect(
+          markdown.trim(),
+          '[Jump](#refs)\n\n- one\n  two\n- <a id="refs"></a>three',
+        );
+      },
+    );
+
     test('renders footnotes when enabled', () async {
       final body = wP(
         innerXml:
@@ -374,6 +1239,33 @@ void main() {
       expect(markdown.contains('[^1]'), isTrue);
       expect(markdown.contains('Footnote text'), isTrue);
     });
+
+    test(
+      'preserves text around a footnote reference in the same run',
+      () async {
+        final body = wP(
+          innerXml:
+              '<w:r>${wT("Before")}<w:footnoteReference w:id="1"/>'
+              '${wT("After")}</w:r>',
+        );
+        final footnotes =
+            '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="1">
+    <w:p><w:r><w:t>Footnote text</w:t></w:r></w:p>
+  </w:footnote>
+</w:footnotes>''';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          footnotesXml: footnotes,
+        );
+
+        final markdown = await DocxConverter(bytes).convert();
+
+        expect(markdown, contains('Before[^1]After'));
+        expect(markdown, contains('[^1]: Footnote text'));
+      },
+    );
 
     test('renders endnotes when enabled', () async {
       final body = wP(
@@ -399,6 +1291,36 @@ void main() {
       expect(markdown.contains('Endnote text'), isTrue);
     });
 
+    test(
+      'preserves text around an endnote reference in the same run',
+      () async {
+        final body = wP(
+          innerXml:
+              '<w:r>${wT("Before")}<w:endnoteReference w:id="2"/>'
+              '${wT("After")}</w:r>',
+        );
+        final endnotes =
+            '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:id="2">
+    <w:p><w:r><w:t>Endnote text</w:t></w:r></w:p>
+  </w:endnote>
+</w:endnotes>''';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          endnotesXml: endnotes,
+        );
+
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(includeEndnotes: true),
+        ).convert();
+
+        expect(markdown, contains('Before[^endnote:2]After'));
+        expect(markdown, contains('[^endnote:2]: Endnote text'));
+      },
+    );
+
     test('emits comments when includeComments is true', () async {
       final body =
           '<w:commentRangeStart w:id="1"/>'
@@ -420,6 +1342,71 @@ void main() {
         config: DocxToMarkdownConfig(includeComments: true),
       ).convert();
       expect(markdown.contains('^[Alice: Note]'), isTrue);
+    });
+
+    test('emits comments whose ranges cross paragraph boundaries', () async {
+      final body = [
+        wP(
+          innerXml:
+              '${wR(text: "Start ")}'
+              '<w:commentRangeStart w:id="1"/>'
+              '${wR(text: "first paragraph")}',
+        ),
+        wP(
+          innerXml:
+              '${wR(text: "second")}'
+              '<w:commentRangeEnd w:id="1"/>'
+              '<w:r><w:commentReference w:id="1"/></w:r>'
+              '${wR(text: " paragraph")}',
+        ),
+      ].join();
+      final comments =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="1" w:author="Alice">
+    <w:p><w:r><w:t>Across paragraphs</w:t></w:r></w:p>
+  </w:comment>
+</w:comments>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        commentsXml: comments,
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(includeComments: true),
+      ).convert();
+      expect(
+        RegExp(r'\^\[Alice: Across paragraphs\]').allMatches(markdown),
+        hasLength(1),
+      );
+      expect(markdown, contains('second^[Alice: Across paragraphs] paragraph'));
+    });
+
+    test('preserves breaks in emitted comment text', () async {
+      final body =
+          '${wR(text: "Text")}'
+          '<w:r><w:commentReference w:id="1"/></w:r>';
+      final comments =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="1" w:author="Alice">
+    <w:p>
+      <w:r><w:t>First line.</w:t></w:r>
+      <w:r><w:br/></w:r>
+      <w:r><w:t>Second line.</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(innerXml: body)),
+        commentsXml: comments,
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(includeComments: true),
+      ).convert();
+      expect(markdown, contains('^[Alice: First line. Second line.]'));
+      expect(markdown, isNot(contains('First line.Second line.')));
     });
 
     test('unknown element policy keepHtml emits comment', () async {
@@ -556,6 +1543,160 @@ void main() {
       expect(markdown.trim(), '1. A\n2. B');
     });
 
+    test('ordered list preserves source number format in the IR', () async {
+      final body = wP(
+        numId: '1',
+        ilvl: 0,
+        innerXml: wR(text: 'A'),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'upperRoman',
+          start: null,
+        ),
+      );
+      final doc = await parseDocument(bytes);
+      final list = doc.blocks.first as ListBlock;
+      expect(list.numberFormat, ListNumberFormat.upperRoman);
+    });
+
+    test('preserveFormat renders upper roman markers with wide gap', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'upperRoman',
+          start: null,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListMarker: OrderedListMarker.preserveFormat,
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      // 'I.' is a single capital marker -> two spaces; 'II.' -> one space.
+      expect(markdown.trim(), 'I.  A\nII. B');
+    });
+
+    test('preserveFormat renders lower alpha markers', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'lowerLetter',
+          start: null,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListMarker: OrderedListMarker.preserveFormat,
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), 'a. A\nb. B');
+    });
+
+    test(
+      'preserveFormat renders parenthesized source marker template',
+      () async {
+        const numbering =
+            '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/>
+      <w:numFmt w:val="lowerLetter"/>
+      <w:lvlText w:val="(%1)"/>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>''';
+        final body = [
+          wP(
+            numId: '1',
+            ilvl: 0,
+            innerXml: wR(text: 'Alpha'),
+          ),
+          wP(
+            numId: '1',
+            ilvl: 0,
+            innerXml: wR(text: 'Beta'),
+          ),
+        ].join();
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          numberingXml: numbering,
+        );
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(
+            orderedListMarker: OrderedListMarker.preserveFormat,
+            orderedListNumbering: OrderedListNumbering.keep,
+          ),
+        ).convert();
+        expect(markdown.trim(), '(a) Alpha\n(b) Beta');
+      },
+    );
+
+    test('default marker stays decimal for an upper roman source', () async {
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'A'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'B'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numberingXml(
+          numId: '1',
+          numFmt: 'upperRoman',
+          start: null,
+        ),
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          orderedListNumbering: OrderedListNumbering.keep,
+        ),
+      ).convert();
+      expect(markdown.trim(), '1. A\n2. B');
+    });
+
     test('tableMode htmlOnly renders HTML even for simple tables', () async {
       final table = '''<w:tbl>
   <w:tr>
@@ -573,6 +1714,7 @@ void main() {
     test('table alignments reflect jc in first row', () async {
       final table = '''<w:tbl>
   <w:tr>
+    <w:trPr><w:tblHeader w:val="on"/></w:trPr>
     <w:tc>
       <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
     </w:tc>
@@ -588,6 +1730,40 @@ void main() {
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(table));
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.contains('|:---:|---:|'), isTrue);
+    });
+
+    test('nested table in a table cell falls back to HTML', () async {
+      final innerTable =
+          '<w:tbl><w:tr><w:tc>${wP(text: "Inner")}</w:tc></w:tr></w:tbl>';
+      final outerTable =
+          '<w:tbl><w:tr><w:tc>${wP(text: "Outer")}$innerTable</w:tc></w:tr></w:tbl>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(outerTable));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim().startsWith('<table>'), isTrue);
+      expect(markdown, contains('Outer'));
+      expect(markdown, contains('Inner'));
+    });
+
+    test('renders footnote reference inside a table cell', () async {
+      final cellParagraph = wP(
+        innerXml:
+            '${wR(text: "Cell")}<w:r><w:footnoteReference w:id="1"/></w:r>',
+      );
+      final table = '<w:tbl><w:tr><w:tc>$cellParagraph</w:tc></w:tr></w:tbl>';
+      final footnotes =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="1">
+    <w:p><w:r><w:t>Footnote in cell</w:t></w:r></w:p>
+  </w:footnote>
+</w:footnotes>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(table),
+        footnotesXml: footnotes,
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, contains('Cell[^1]'));
+      expect(markdown, contains('[^1]: Footnote in cell'));
     });
 
     test('ignores comments when includeComments is false', () async {
@@ -684,6 +1860,57 @@ void main() {
       );
     });
 
+    test('showDeletionsAsStrikethrough renders deleted text struck', () async {
+      final body =
+          '<w:p><w:del><w:r><w:delText>Removed</w:delText></w:r></w:del></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          trackChangesMode: TrackChangesMode.showDeletionsAsStrikethrough,
+        ),
+      ).convert();
+      expect(markdown.trim(), '~~Removed~~');
+    });
+
+    test('rejectChanges restores deleted text as plain text', () async {
+      final body =
+          '<w:p><w:del><w:r><w:delText>Removed</w:delText></w:r></w:del></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          trackChangesMode: TrackChangesMode.rejectChanges,
+        ),
+      ).convert();
+      expect(markdown.trim(), 'Removed');
+    });
+
+    test('rejectChanges drops inserted text', () async {
+      final body = '<w:p><w:ins><w:r><w:t>Added</w:t></w:r></w:ins></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(
+          trackChangesMode: TrackChangesMode.rejectChanges,
+        ),
+      ).convert();
+      expect(markdown.trim(), '');
+    });
+
+    test('acceptAll keeps inserted text', () async {
+      final body = '<w:p><w:ins><w:r><w:t>Added</w:t></w:r></w:ins></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'Added');
+    });
+
+    test('empty document body renders empty Markdown', () async {
+      final bytes = buildDocxBytes();
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown, isEmpty);
+    });
+
     test('preserveEmptyParagraphs keeps empty paragraph', () async {
       final body = wP(innerXml: '');
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
@@ -713,6 +1940,55 @@ void main() {
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '<sup>***~~<u>Text</u>~~***</sup>');
+    });
+
+    test('run formatting respects off values', () async {
+      final run = wR(
+        innerXml: wT('Text'),
+        rPrXml:
+            '<w:b w:val="0"/><w:i w:val="false"/><w:u w:val="none"/><w:strike w:val="off"/>',
+      );
+      final body = wP(innerXml: run);
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'Text');
+    });
+
+    test('complex script bold and italic are treated as formatting', () async {
+      final run = wR(innerXml: wT('Text'), rPrXml: '<w:bCs/><w:iCs/>');
+      final body = wP(innerXml: run);
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '***Text***');
+    });
+
+    test('direct off values override inherited style run properties', () async {
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Styled">
+    <w:name w:val="Styled"/>
+    <w:rPr><w:b/><w:i/></w:rPr>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            styleId: 'Styled',
+            innerXml: wR(text: 'Text', rPrXml: '<w:b w:val="0"/>'),
+          ),
+        ),
+        stylesXml: styles,
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '*Text*');
+    });
+
+    test('preserves RTL paragraph text order', () async {
+      final body =
+          '<w:p><w:pPr><w:bidi/></w:pPr>${wR(text: "مرحبا بالعالم")}</w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), 'مرحبا بالعالم');
     });
 
     test('horizontal rule detected by --- text', () async {
@@ -748,7 +2024,74 @@ void main() {
       expect(markdown.contains('\$x\$'), isTrue);
     });
 
+    test('inline math renders OMML superscript fallback', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:sSup>'
+          '<m:e><m:r><m:t>x</m:t></m:r></m:e>'
+          '<m:sup><m:r><m:t>2</m:t></m:r></m:sup>'
+          '</m:sSup>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'$x^{2}$'), isTrue);
+    });
+
+    test('inline math renders n-ary summation with limits', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:nary>'
+          '<m:naryPr><m:chr m:val="∑"/></m:naryPr>'
+          '<m:sub><m:r><m:t>i=0</m:t></m:r></m:sub>'
+          '<m:sup><m:r><m:t>n</m:t></m:r></m:sup>'
+          '<m:e><m:r><m:t>x</m:t></m:r></m:e>'
+          '</m:nary>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'$\sum_{i=0}^{n}{x}$'), isTrue);
+    });
+
+    test('inline math renders delimiters', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:d><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'\left( x \right)'), isTrue);
+    });
+
+    test('inline math renders matrices', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:m>'
+          '<m:mr><m:e><m:r><m:t>a</m:t></m:r></m:e>'
+          '<m:e><m:r><m:t>b</m:t></m:r></m:e></m:mr>'
+          '<m:mr><m:e><m:r><m:t>c</m:t></m:r></m:e>'
+          '<m:e><m:r><m:t>d</m:t></m:r></m:e></m:mr>'
+          '</m:m>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(
+        markdown.contains(r'\begin{matrix}a & b \\ c & d\end{matrix}'),
+        isTrue,
+      );
+    });
+
+    test('inline math renders accents with default hat', () async {
+      final body =
+          '<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+          '<m:acc><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc>'
+          '</m:oMath></w:p>';
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.contains(r'\hat{x}'), isTrue);
+    });
+
     test('ommlToLatex hook overrides math conversion', () async {
+      HookContext? seenContext;
       final body =
           '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
           '<m:t>x</m:t></m:oMath>';
@@ -756,11 +2099,64 @@ void main() {
       final markdown = await DocxConverter(
         bytes,
         config: DocxToMarkdownConfig(
-          hooks: DocxToMarkdownHooks(ommlToLatex: (xml, [ctx]) => 'Y'),
+          hooks: DocxToMarkdownHooks(
+            ommlToLatex: (xml, [ctx]) {
+              seenContext = ctx;
+              return 'Y';
+            },
+          ),
         ),
       ).convert();
       expect(markdown.contains('\$\$'), isTrue);
       expect(markdown.contains('Y'), isTrue);
+      expect(seenContext?.part, 'word/document.xml');
+      expect(seenContext?.path, contains('document.xml:body'));
+    });
+
+    test('parses deeply nested mixed ordered and bullet lists', () async {
+      final numbering =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+    <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          ilvl: 0,
+          innerXml: wR(text: 'One'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 1,
+          innerXml: wR(text: 'Two'),
+        ),
+        wP(
+          numId: '1',
+          ilvl: 2,
+          innerXml: wR(text: 'Three'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numbering,
+      );
+      final doc = await parseDocument(bytes);
+      final level0 = doc.blocks.single as ListBlock;
+      final level1 = level0.items.single.blocks[1] as ListBlock;
+      final level2 = level1.items.single.blocks[1] as ListBlock;
+      expect(level0.ordered, isTrue);
+      expect(level1.ordered, isFalse);
+      expect(level2.ordered, isTrue);
+      expect(
+        (level2.items.single.blocks.single as ParagraphBlock).inlines
+            .toPlainText(),
+        'Three',
+      );
     });
 
     test('includes headers and footers when enabled', () async {
@@ -846,6 +2242,87 @@ void main() {
       expect(markdown.trim(), 'X');
     });
 
+    test('hooks receive paragraph style and list metadata', () async {
+      final contexts = <HookContext>[];
+      final metas = <NodeMeta?>[];
+      final body = wP(
+        text: 'Styled list item',
+        styleId: 'Bibliography',
+        numId: '1',
+        ilvl: 0,
+      );
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Bibliography">
+    <w:name w:val="Bibliography"/>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: styles,
+        numberingXml: numberingXml(numId: '1', numFmt: 'bullet', start: null),
+      );
+      final config = DocxToMarkdownConfig(
+        hooks: DocxToMarkdownHooks(
+          transformBlock: (block, ctx) {
+            if (block is ParagraphBlock) {
+              contexts.add(ctx);
+              metas.add(block.meta);
+            }
+            return block;
+          },
+        ),
+      );
+
+      await DocxConverter(bytes, config: config).convert();
+
+      expect(contexts.single.styleId, 'Bibliography');
+      expect(contexts.single.listLevel, 0);
+      expect(contexts.single.meta['numId'], '1');
+      expect(metas.single?.attributes['styleId'], 'Bibliography');
+      expect(metas.single?.attributes['styleName'], 'Bibliography');
+      expect(metas.single?.attributes['numId'], '1');
+      expect(metas.single?.attributes['ilvl'], 0);
+    });
+
+    test('inline hooks receive character style metadata', () async {
+      final contexts = <HookContext>[];
+      final metas = <NodeMeta?>[];
+      final body = wP(
+        innerXml:
+            '<w:r><w:rPr><w:rStyle w:val="MyStyle"/></w:rPr>'
+            '<w:t>Styled span</w:t></w:r>',
+      );
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="character" w:styleId="MyStyle" w:customStyle="1">
+    <w:name w:val="My Style"/>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: styles,
+      );
+      final config = DocxToMarkdownConfig(
+        hooks: DocxToMarkdownHooks(
+          transformInline: (inlineNode, ctx) {
+            if (inlineNode is TextInline) {
+              contexts.add(ctx);
+              metas.add(inlineNode.meta);
+            }
+            return inlineNode;
+          },
+        ),
+      );
+
+      await DocxConverter(bytes, config: config).convert();
+
+      expect(contexts.single.styleId, 'MyStyle');
+      expect(contexts.single.meta['styleName'], 'My Style');
+      expect(metas.single?.attributes['styleId'], 'MyStyle');
+      expect(metas.single?.attributes['styleName'], 'My Style');
+    });
+
     test('onWarning hook is invoked', () async {
       final bytes = buildDocxBytes(
         documentXml: docXmlWithBody('<w:customUnknown>Inner</w:customUnknown>'),
@@ -871,6 +2348,231 @@ void main() {
       final doc = await parseDocument(bytes);
       expect(doc.warnings, isNotEmpty);
       expect(doc.warnings.first.code, 'unsupported.block');
+    });
+  });
+
+  group('Property elements are never inline content', () {
+    // Some tools (and hand edits) pretty-print document.xml, leaving literal
+    // whitespace text nodes inside <w:pPr>. That whitespace must never leak
+    // into the paragraph's text, and pPr must not produce a warning.
+    test(
+      'whitespace-formatted w:pPr does not leak into heading text',
+      () async {
+        const body = '''
+<w:p>
+  <w:pPr>
+    <w:pStyle w:val="Heading1"/>
+  </w:pPr>
+  <w:r><w:t>Hello</w:t></w:r>
+</w:p>''';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          stylesXml: stylesXml(
+            styleId: 'Heading1',
+            styleName: 'heading 1',
+            outlineLevel: 0,
+          ),
+        );
+        final doc = await parseDocument(bytes);
+        expect(doc.blocks, hasLength(1));
+        final heading = doc.blocks.single as HeadingBlock;
+        expect(heading.level, 1);
+        expect(heading.inlines.toPlainText(), 'Hello');
+        expect(
+          doc.warnings.where((w) => w.message.contains('pPr')),
+          isEmpty,
+          reason: 'w:pPr must be skipped, not treated as an unknown inline',
+        );
+      },
+    );
+
+    test(
+      'whitespace-formatted w:pPr does not leak into paragraph text',
+      () async {
+        const body = '''
+<w:p>
+  <w:pPr>
+    <w:jc w:val="center"/>
+  </w:pPr>
+  <w:r><w:t>Centered</w:t></w:r>
+</w:p>''';
+        final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+        final doc = await parseDocument(bytes);
+        final para = doc.blocks.single as ParagraphBlock;
+        expect(para.inlines.toPlainText(), 'Centered');
+      },
+    );
+  });
+
+  group('Title/Subtitle heading heuristic is leaf-only', () {
+    const titleStyles =
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Title"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Author"><w:name w:val="Author"/><w:basedOn w:val="Title"/></w:style>
+</w:styles>''';
+
+    test(
+      'Title -> H1 and Subtitle -> H2, but Author (basedOn Title) stays a paragraph',
+      () async {
+        final body =
+            wP(text: 'The Title', styleId: 'Title') +
+            wP(text: 'The Subtitle', styleId: 'Subtitle') +
+            wP(text: 'A. Author', styleId: 'Author');
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          stylesXml: titleStyles,
+        );
+        final doc = await parseDocument(bytes);
+        expect(doc.blocks, hasLength(3));
+        expect(
+          doc.blocks[0],
+          isA<HeadingBlock>().having((h) => h.level, 'level', 1),
+        );
+        expect(
+          doc.blocks[1],
+          isA<HeadingBlock>().having((h) => h.level, 'level', 2),
+        );
+        expect(
+          doc.blocks[2],
+          isA<ParagraphBlock>(),
+          reason: 'Author only inherits Title via basedOn; it is not a heading',
+        );
+      },
+    );
+  });
+
+  group('Monospace character style (w:rStyle) becomes inline code', () {
+    const verbatimStyles =
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="character" w:styleId="VerbatimChar"><w:name w:val="Verbatim Char"/><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr></w:style>
+</w:styles>''';
+
+    test('run carrying a Consolas character style renders as code', () async {
+      final body = wP(
+        innerXml: wR(
+          text: 'snippet',
+          rPrXml: '<w:rStyle w:val="VerbatimChar"/>',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: verbatimStyles,
+      );
+      final doc = await parseDocument(bytes);
+      final para = doc.blocks.single as ParagraphBlock;
+      expect(
+        para.inlines.single,
+        isA<CodeInline>().having((c) => c.text, 'text', 'snippet'),
+      );
+    });
+
+    test('code run with superscript composes <sup> around the code', () async {
+      final body = wP(
+        innerXml:
+            wR(text: 'm', rPrXml: '<w:rStyle w:val="VerbatimChar"/>') +
+            wR(
+              text: '2',
+              rPrXml:
+                  '<w:rStyle w:val="VerbatimChar"/><w:vertAlign w:val="superscript"/>',
+            ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: verbatimStyles,
+      );
+      final doc = await parseDocument(bytes);
+      final para = doc.blocks.single as ParagraphBlock;
+      expect(para.inlines, hasLength(2));
+      expect(
+        para.inlines[0],
+        isA<CodeInline>().having((c) => c.text, 'text', 'm'),
+      );
+      final sup = para.inlines[1] as SupInline;
+      expect(
+        sup.children.single,
+        isA<CodeInline>().having((c) => c.text, 'text', '2'),
+        reason: 'superscript must wrap the code, not replace it',
+      );
+
+      final md = await DocxConverter(bytes).convert();
+      expect(md, contains('<sup>'));
+      expect(md, contains('`2`'));
+    });
+  });
+
+  group('Style-level run properties format child runs', () {
+    test('paragraph style w:rPr applies to unformatted runs', () async {
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="AbstractTitle">
+    <w:name w:val="Abstract Title"/>
+    <w:rPr><w:b/><w:i/></w:rPr>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            styleId: 'AbstractTitle',
+            innerXml: wR(text: 'Styled'),
+          ),
+        ),
+        stylesXml: styles,
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(markdown.trim(), '***Styled***');
+    });
+
+    test('direct nil shading overrides inherited shaded code', () async {
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Shaded">
+    <w:name w:val="Shaded"/>
+    <w:rPr><w:shd w:val="clear" w:fill="DDDDDD"/></w:rPr>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            styleId: 'Shaded',
+            innerXml: wR(text: 'Plain', rPrXml: '<w:shd w:val="nil"/>'),
+          ),
+        ),
+        stylesXml: styles,
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(markdown.trim(), 'Plain');
+    });
+
+    test('character style w:rPr applies to the styled run', () async {
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="character" w:styleId="EmphasisChar">
+    <w:name w:val="Emphasis Char"/>
+    <w:rPr><w:i/><w:u/></w:rPr>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            innerXml: wR(
+              text: 'Styled',
+              rPrXml: '<w:rStyle w:val="EmphasisChar"/>',
+            ),
+          ),
+        ),
+        stylesXml: styles,
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(markdown.trim(), '*<u>Styled</u>*');
     });
   });
 }

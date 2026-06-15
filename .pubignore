@@ -1,0 +1,19 @@
+# Files excluded from the published pub.dev archive (keeps it small).
+# lib/, example/, README.md, CHANGELOG.md, LICENSE, analysis_options.yaml ship.
+
+# CI / tooling / coverage
+.github/
+tool/
+coverage/
+
+# Tests and their (potentially large) binary fixtures
+test/
+**/*.docx
+
+# Contributor-only docs
+docs_guide.md
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store

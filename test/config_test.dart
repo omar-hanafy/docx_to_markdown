@@ -9,6 +9,8 @@ void main() {
       expect(config.extractImages, isTrue);
       expect(config.bulletMarkers, contains('-'));
       expect(config.listIndent, greaterThanOrEqualTo(0));
+      expect(config.trackChangesMode, TrackChangesMode.acceptAll);
+      expect(config.orderedListMarker, OrderedListMarker.decimal);
       expect(() => config.bulletMarkers.add('x'), throwsUnsupportedError);
     });
 
@@ -26,11 +28,43 @@ void main() {
         extractImages: false,
         orderedListNumbering: OrderedListNumbering.keep,
         lineBreakStyle: LineBreakStyle.htmlBr,
+        trackChangesMode: TrackChangesMode.showDeletionsAsStrikethrough,
+        orderedListMarker: OrderedListMarker.preserveFormat,
       );
       expect(copy.flavor, MarkdownFlavor.commonmark);
       expect(copy.extractImages, isFalse);
       expect(copy.orderedListNumbering, OrderedListNumbering.keep);
       expect(copy.lineBreakStyle, LineBreakStyle.htmlBr);
+      expect(
+        copy.trackChangesMode,
+        TrackChangesMode.showDeletionsAsStrikethrough,
+      );
+      expect(copy.orderedListMarker, OrderedListMarker.preserveFormat);
+    });
+
+    test('highlight and color modes default to none and round-trip', () {
+      final config = DocxToMarkdownConfig.defaults;
+      expect(config.highlightMode, HighlightMode.none);
+      expect(config.textColorMode, TextColorMode.none);
+
+      final copy = config.copyWith(
+        highlightMode: HighlightMode.mark,
+        textColorMode: TextColorMode.htmlSpan,
+      );
+      expect(copy.highlightMode, HighlightMode.mark);
+      expect(copy.textColorMode, TextColorMode.htmlSpan);
+      // Unspecified copyWith preserves the overridden values.
+      expect(copy.copyWith().highlightMode, HighlightMode.mark);
+      expect(copy.copyWith().textColorMode, TextColorMode.htmlSpan);
+    });
+
+    test('pageBreakMode defaults to ignore and round-trips', () {
+      expect(DocxToMarkdownConfig.defaults.pageBreakMode, PageBreakMode.ignore);
+      final copy = DocxToMarkdownConfig.defaults.copyWith(
+        pageBreakMode: PageBreakMode.thematicBreak,
+      );
+      expect(copy.pageBreakMode, PageBreakMode.thematicBreak);
+      expect(copy.copyWith().pageBreakMode, PageBreakMode.thematicBreak);
     });
 
     test('imageSizeMode none with maxImageWidth 0 is valid', () {
@@ -50,6 +84,27 @@ void main() {
       expect(
         () => DocxToMarkdownConfig(bulletMarkers: const [' ', '']),
         throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('metadataMode defaults to none', () {
+      expect(DocxToMarkdownConfig.defaults.metadataMode, MetadataMode.none);
+      expect(DocxToMarkdownConfig().metadataMode, MetadataMode.none);
+    });
+
+    test('copyWith overrides metadataMode and preserves it', () {
+      final copy = DocxToMarkdownConfig.defaults.copyWith(
+        metadataMode: MetadataMode.yamlFrontMatter,
+      );
+      expect(copy.metadataMode, MetadataMode.yamlFrontMatter);
+      // Unspecified copyWith preserves the overridden value.
+      expect(copy.copyWith().metadataMode, MetadataMode.yamlFrontMatter);
+    });
+
+    test('toString includes metadataMode', () {
+      expect(
+        DocxToMarkdownConfig.defaults.toString(),
+        contains('metadataMode: MetadataMode.none'),
       );
     });
   });

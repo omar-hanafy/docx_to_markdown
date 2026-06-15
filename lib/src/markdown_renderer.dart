@@ -14,6 +14,7 @@
 
 import 'package:docx_to_markdown/src/config.dart';
 import 'package:docx_to_markdown/src/ir.dart';
+import 'package:docx_to_markdown/src/metadata_yaml.dart';
 
 /// Renders the intermediate [Document] structure into a Markdown string.
 ///
@@ -56,6 +57,19 @@ class MarkdownRenderer {
       preserveHardBreaks: config.lineBreakStyle == LineBreakStyle.hardBreak,
     );
     final root = _RenderContext.root();
+
+    // Optional YAML front matter, emitted before the body and separated from it
+    // by a blank line. Only when explicitly enabled and metadata is present.
+    if (config.metadataMode == MetadataMode.yamlFrontMatter &&
+        document.metadata.isNotEmpty) {
+      final frontMatter = renderMetadataFrontMatter(document.metadata);
+      if (frontMatter.isNotEmpty) {
+        for (final line in frontMatter.split('\n')) {
+          w.writelnRaw(line);
+        }
+        w.ensureBlankLine(root);
+      }
+    }
 
     _renderBlocks(document.blocks, w, root, separateWithBlankLine: true);
 
@@ -144,6 +158,19 @@ class MarkdownRenderer {
       return;
     }
 
+    if (block is PageBreakBlock) {
+      switch (config.pageBreakMode) {
+        case PageBreakMode.ignore:
+          return;
+        case PageBreakMode.thematicBreak:
+          w.writeln('---', ctx);
+          return;
+        case PageBreakMode.htmlComment:
+          w.writeln('<!-- page break -->', ctx);
+          return;
+      }
+    }
+
     if (block is CodeBlock) {
       _renderFencedCodeBlock(w, ctx, block.text, language: block.language);
       return;
@@ -161,8 +188,28 @@ class MarkdownRenderer {
       return;
     }
 
+    if (block is DefinitionListBlock) {
+      _renderDefinitionList(block, w, ctx);
+      return;
+    }
+
     if (block is TableBlock) {
       _renderTableBlock(block, w, ctx);
+      return;
+    }
+
+    if (block is ImageBlock) {
+      w.writeln(
+        _renderImageMarkdown(
+          src: block.src,
+          alt: block.alt,
+          title: block.title,
+          widthPx: block.widthPx,
+          heightPx: block.heightPx,
+          contextPath: 'block/image',
+        ),
+        ctx,
+      );
       return;
     }
 
@@ -260,10 +307,17 @@ class MarkdownRenderer {
         ctx,
         ordered: list.ordered,
         index: index,
+        numberFormat: list.numberFormat,
+        markerTemplate: _listMarkerTemplate(list),
         listDepth: depth,
         loose: loose,
       );
     }
+  }
+
+  String? _listMarkerTemplate(ListBlock list) {
+    final value = list.meta?.attributes['lvlText'];
+    return value is String ? value : null;
   }
 
   int _orderedListIndexForItem(ListBlock list, int itemIndex) {
@@ -302,6 +356,8 @@ class MarkdownRenderer {
       if (i is UnderlineInline && _containsHardBreak(i.children)) return true;
       if (i is SupInline && _containsHardBreak(i.children)) return true;
       if (i is SubInline && _containsHardBreak(i.children)) return true;
+      if (i is HighlightInline && _containsHardBreak(i.children)) return true;
+      if (i is ColorInline && _containsHardBreak(i.children)) return true;
       if (i is LinkInline && _containsHardBreak(i.children)) return true;
     }
     return false;
@@ -313,15 +369,23 @@ class MarkdownRenderer {
     _RenderContext ctx, {
     required bool ordered,
     required int index,
+    required ListNumberFormat numberFormat,
+    required String? markerTemplate,
     required int listDepth,
     required bool loose,
   }) {
-    final marker = ordered
-        ? '$index.'
+    final baseMarker = ordered
+        ? _orderedMarker(numberFormat, index, markerTemplate: markerTemplate)
         : config.bulletMarkers[listDepth % config.bulletMarkers.length];
-    final markerPrefix = '${ctx.prefix}$marker ';
-    final hangingPrefix = ctx.prefix + ' ' * (marker.length + 1);
-    final listIndent = _listIndentForMarker(marker);
+    final marker = item.checked == null
+        ? baseMarker
+        : '$baseMarker [${item.checked! ? 'x' : ' '}]';
+    // Pandoc requires two spaces after a single capital-letter marker (A. / I.)
+    // so it is not mistaken for prose; one space is fine everywhere else.
+    final gap = (ordered && _needsWideGap(marker)) ? '  ' : ' ';
+    final markerPrefix = '${ctx.prefix}$marker$gap';
+    final hangingPrefix = ctx.prefix + ' ' * (marker.length + gap.length);
+    final listIndent = _listIndentForMarker(baseMarker, gap.length);
 
     if (item.blocks.isEmpty) {
       w.writelnRaw(markerPrefix.trimRight());
@@ -380,10 +444,231 @@ class MarkdownRenderer {
     }
   }
 
-  int _listIndentForMarker(String marker) {
-    final minIndent = marker.length + 1;
+  int _listIndentForMarker(String marker, int gapLen) {
+    final minIndent = marker.length + gapLen;
     if (config.listIndent <= minIndent) return minIndent;
     return config.listIndent;
+  }
+
+  static final _singleCapitalMarkerRe = RegExp(r'^[A-Z]\.$');
+
+  /// Whether a marker is a single capital letter + period (`A.`, `I.`), which
+  /// Pandoc requires be followed by two spaces.
+  bool _needsWideGap(String marker) => _singleCapitalMarkerRe.hasMatch(marker);
+
+  /// Formats an ordered-list marker for [index] given its source [format].
+  ///
+  /// Decimal markers (and all markers when [OrderedListMarker.decimal] is in
+  /// effect) render as `index.`; [OrderedListMarker.preserveFormat] renders
+  /// Roman/alphabetic markers for Pandoc fancy lists.
+  String _orderedMarker(
+    ListNumberFormat format,
+    int index, {
+    String? markerTemplate,
+  }) {
+    if (config.orderedListMarker == OrderedListMarker.decimal) {
+      return '$index.';
+    }
+    final value = _orderedMarkerValue(format, index);
+    final templated = markerTemplate == null
+        ? null
+        : _applyOrderedMarkerTemplate(markerTemplate, value);
+    return templated ?? '$value.';
+  }
+
+  String _orderedMarkerValue(ListNumberFormat format, int index) {
+    switch (format) {
+      case ListNumberFormat.decimal:
+        return '$index';
+      case ListNumberFormat.lowerAlpha:
+        return _toAlpha(index);
+      case ListNumberFormat.upperAlpha:
+        return _toAlpha(index).toUpperCase();
+      case ListNumberFormat.lowerRoman:
+        return _toRoman(index);
+      case ListNumberFormat.upperRoman:
+        return _toRoman(index).toUpperCase();
+    }
+  }
+
+  String? _applyOrderedMarkerTemplate(String template, String markerValue) {
+    final matches = RegExp(r'%\d+').allMatches(template).toList();
+    if (matches.length != 1) return null;
+    final marker = template.replaceRange(
+      matches.single.start,
+      matches.single.end,
+      markerValue,
+    );
+    final trimmed = marker.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  /// Converts [n] (1-based) to a bijective base-26 lowercase string: 1->a,
+  /// 26->z, 27->aa. Non-positive values fall back to the decimal form.
+  static String _toAlpha(int n) {
+    if (n <= 0) return '$n';
+    final units = <int>[];
+    var value = n;
+    while (value > 0) {
+      value--;
+      units.add(0x61 + value % 26);
+      value ~/= 26;
+    }
+    return String.fromCharCodes(units.reversed);
+  }
+
+  /// Converts [n] (1-based) to a lowercase Roman numeral. Non-positive values
+  /// fall back to the decimal form.
+  static String _toRoman(int n) {
+    if (n <= 0) return '$n';
+    const values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+    const symbols = [
+      'm', 'cm', 'd', 'cd', 'c', 'xc', 'l', 'xl', 'x', 'ix', 'v', 'iv', 'i', //
+    ];
+    final sb = StringBuffer();
+    var value = n;
+    for (var i = 0; i < values.length; i++) {
+      while (value >= values[i]) {
+        sb.write(symbols[i]);
+        value -= values[i];
+      }
+    }
+    return sb.toString();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Definition lists
+  // ---------------------------------------------------------------------------
+
+  /// Renders a definition list per [DocxToMarkdownConfig.definitionListMode].
+  void _renderDefinitionList(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    switch (config.definitionListMode) {
+      case DefinitionListMode.html:
+        _renderDefinitionListHtml(list, w, ctx);
+        return;
+      case DefinitionListMode.pandoc:
+        _renderDefinitionListPandoc(list, w, ctx);
+        return;
+      case DefinitionListMode.paragraphs:
+        _renderDefinitionListParagraphs(list, w, ctx);
+        return;
+    }
+  }
+
+  /// Emits an HTML `<dl>`. A single-paragraph definition is inlined into the
+  /// `<dd>`; a multi-block definition wraps each block (`<p>`, `<pre>`, lists)
+  /// on its own line. A term with no definition emits a `<dt>` without a `<dd>`.
+  void _renderDefinitionListHtml(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    w.writeln('<dl>', ctx);
+    for (final item in list.items) {
+      w.writeln('<dt>${_renderInlineGroupAsHtml(item.term).trim()}</dt>', ctx);
+      final defs = item.definitions;
+      if (defs.isEmpty) continue;
+      if (defs.length == 1 && defs.first is ParagraphBlock) {
+        final inner = _renderInlineGroupAsHtml(
+          (defs.first as ParagraphBlock).inlines,
+        ).trim();
+        w.writeln('<dd>$inner</dd>', ctx);
+      } else {
+        w.writeln('<dd>', ctx);
+        for (final b in defs) {
+          for (final line in _definitionBlockHtml(b)) {
+            w.writeln(line, ctx);
+          }
+        }
+        w.writeln('</dd>', ctx);
+      }
+    }
+    w.writeln('</dl>', ctx);
+  }
+
+  List<String> _definitionBlockHtml(Block b) {
+    if (b is ParagraphBlock) {
+      return ['<p>${_renderInlineGroupAsHtml(b.inlines).trim()}</p>'];
+    }
+    if (b is CodeBlock) {
+      return ['<pre><code>${_escapeHtml(b.text)}</code></pre>'];
+    }
+    if (b is ListBlock) {
+      return [_renderListAsHtml(b)];
+    }
+    // Fallback for any other block type: keep the text rather than drop it.
+    return ['<p>${_escapeHtml(_renderBlockAsPlainText(b)).trim()}</p>'];
+  }
+
+  /// Emits Pandoc definition syntax: the term, a blank line, then the body with
+  /// its first line marked `:   ` and continuation lines indented four spaces
+  /// (the same continuation shape Pandoc uses).
+  void _renderDefinitionListPandoc(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    for (var i = 0; i < list.items.length; i++) {
+      if (i > 0) w.ensureBlankLine(ctx);
+      final item = list.items[i];
+      final term = _renderInlineGroupAsText(
+        item.term,
+        canBreak: false,
+        breakAsBr: true,
+      ).trim();
+      w.writeln(_escapeParagraphLineStartIfNeeded(term), ctx);
+      if (item.definitions.isEmpty) continue;
+      w.ensureBlankLine(ctx);
+
+      final tmp = _LineWriter(
+        trimTrailingWhitespace: config.trimTrailingWhitespace,
+        preserveHardBreaks: config.lineBreakStyle == LineBreakStyle.hardBreak,
+      );
+      _renderBlocks(
+        item.definitions,
+        tmp,
+        _RenderContext.root(),
+        separateWithBlankLine: true,
+      );
+      final lines = tmp.toString().split('\n');
+      var firstBodyLine = true;
+      for (final line in lines) {
+        if (firstBodyLine) {
+          w.writelnRaw('${ctx.prefix}:   $line');
+          firstBodyLine = false;
+        } else if (line.isEmpty) {
+          w.writelnRaw(ctx.prefix.trimRight());
+        } else {
+          w.writelnRaw('${ctx.prefix}    $line');
+        }
+      }
+    }
+  }
+
+  /// Degrades the list to flat output: the term as its own paragraph followed
+  /// by the definition blocks rendered normally.
+  void _renderDefinitionListParagraphs(
+    DefinitionListBlock list,
+    _LineWriter w,
+    _RenderContext ctx,
+  ) {
+    var first = true;
+    for (final item in list.items) {
+      if (!first) w.ensureBlankLine(ctx);
+      first = false;
+      final termLines = _renderParagraphLines(item.term, canBreak: true);
+      for (final line in termLines) {
+        w.writeln(_escapeParagraphLineStartIfNeeded(line), ctx);
+      }
+      for (final b in item.definitions) {
+        w.ensureBlankLine(ctx);
+        _renderBlock(b, w, ctx);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -430,6 +715,10 @@ class MarkdownRenderer {
 
     final cols = rows.first.cells.length;
     if (cols == 0) return false;
+
+    if (!rows.any((row) => row.isHeader || row.cells.any((c) => c.isHeader))) {
+      return false;
+    }
 
     // Rectangular
     if (rows.any((r) => r.cells.length != cols)) return false;
@@ -569,7 +858,7 @@ class MarkdownRenderer {
       w.writeln('  <tr>', ctx);
 
       for (final cell in row.cells) {
-        final tag = (r == 0) ? 'th' : 'td';
+        final tag = row.isHeader || cell.isHeader ? 'th' : 'td';
 
         final attrs = StringBuffer();
         if (cell.colSpan != 1) attrs.write(' colspan="${cell.colSpan}"');
@@ -601,6 +890,8 @@ class MarkdownRenderer {
       } else if (b is ListBlock) {
         // Minimal HTML list fallback inside table cell
         parts.add(_renderListAsHtml(b));
+      } else if (b is TableBlock) {
+        parts.add(_renderTableAsHtmlString(b));
       } else {
         parts.add(_escapeHtml(_renderBlockAsPlainText(b)));
       }
@@ -609,12 +900,34 @@ class MarkdownRenderer {
     return parts.join('<br/>');
   }
 
+  String _renderTableAsHtmlString(TableBlock table) {
+    final rows = table.grid.rows;
+    if (rows.isEmpty) return '';
+
+    final sb = StringBuffer()..write('<table>');
+    for (final row in rows) {
+      sb.write('<tr>');
+      for (final cell in row.cells) {
+        final tag = row.isHeader || cell.isHeader ? 'th' : 'td';
+        final attrs = StringBuffer();
+        if (cell.colSpan != 1) attrs.write(' colspan="${cell.colSpan}"');
+        if (cell.rowSpan != 1) attrs.write(' rowspan="${cell.rowSpan}"');
+        sb.write('<$tag${attrs.toString()}>${_renderCellHtml(cell)}</$tag>');
+      }
+      sb.write('</tr>');
+    }
+    sb.write('</table>');
+    return sb.toString();
+  }
+
   String _renderListAsHtml(ListBlock list) {
     final tag = list.ordered ? 'ol' : 'ul';
     final sb = StringBuffer()..write('<$tag>');
 
     for (final item in list.items) {
       sb.write('<li>');
+      final checkboxHtml = _taskCheckboxHtml(item.checked);
+      if (checkboxHtml != null) sb.write(checkboxHtml);
 
       // Flatten item blocks to HTML
       final blocksHtml = <String>[];
@@ -624,6 +937,8 @@ class MarkdownRenderer {
           if (html.trim().isNotEmpty) blocksHtml.add(html);
         } else if (b is ListBlock) {
           blocksHtml.add(_renderListAsHtml(b));
+        } else if (b is TableBlock) {
+          blocksHtml.add(_renderTableAsHtmlString(b));
         } else if (b is CodeBlock) {
           blocksHtml.add('<pre><code>${_escapeHtml(b.text)}</code></pre>');
         } else {
@@ -639,9 +954,126 @@ class MarkdownRenderer {
     return sb.toString();
   }
 
+  String? _taskCheckboxHtml(bool? checked) {
+    if (checked == null) return null;
+    return checked
+        ? '<input type="checkbox" checked disabled/> '
+        : '<input type="checkbox" disabled/> ';
+  }
+
   // ---------------------------------------------------------------------------
   // Inlines
   // ---------------------------------------------------------------------------
+
+  /// Merges adjacent inline spans of identical type so that Word's split runs
+  /// (e.g. two consecutive bold runs, or a bold run followed by a bold-italic
+  /// run) render as a single emphasis span instead of fusing into ambiguous
+  /// Markdown delimiters such as `****` or `*****`.
+  ///
+  /// Applied recursively to children so the result is fully normalized
+  /// regardless of nesting. Only attribute-free wrappers and same-color
+  /// highlight/color spans merge; distinct-semantic nodes (code, links, images,
+  /// footnotes, line breaks, raw HTML) never merge. Merged nodes get a fresh
+  /// (null) [NodeMeta]; `meta` is non-semantic and excluded from equality.
+  List<Inline> _normalizeInlines(List<Inline> inlines) {
+    if (inlines.length < 2 &&
+        inlines.isNotEmpty &&
+        !_hasMergeableChildren(inlines.first)) {
+      return inlines;
+    }
+    final out = <Inline>[];
+    for (final node in inlines) {
+      final normalized = _normalizeInlineNode(node);
+      if (out.isNotEmpty) {
+        final merged = _tryMergeInlines(out.last, normalized);
+        if (merged != null) {
+          out[out.length - 1] = merged;
+          continue;
+        }
+      }
+      out.add(normalized);
+    }
+    return out;
+  }
+
+  bool _hasMergeableChildren(Inline node) =>
+      node is StrongInline ||
+      node is EmphInline ||
+      node is StrikeInline ||
+      node is UnderlineInline ||
+      node is SupInline ||
+      node is SubInline ||
+      node is HighlightInline ||
+      node is ColorInline ||
+      node is LinkInline;
+
+  /// Returns [node] with its children recursively normalized, preserving the
+  /// wrapper type and any attributes.
+  Inline _normalizeInlineNode(Inline node) {
+    if (node is StrongInline) {
+      return StrongInline(_normalizeInlines(node.children));
+    }
+    if (node is EmphInline) return EmphInline(_normalizeInlines(node.children));
+    if (node is StrikeInline) {
+      return StrikeInline(_normalizeInlines(node.children));
+    }
+    if (node is UnderlineInline) {
+      return UnderlineInline(_normalizeInlines(node.children));
+    }
+    if (node is SupInline) return SupInline(_normalizeInlines(node.children));
+    if (node is SubInline) return SubInline(_normalizeInlines(node.children));
+    if (node is HighlightInline) {
+      return HighlightInline(
+        _normalizeInlines(node.children),
+        color: node.color,
+      );
+    }
+    if (node is ColorInline) {
+      return ColorInline(_normalizeInlines(node.children), color: node.color);
+    }
+    if (node is LinkInline) {
+      return LinkInline(
+        url: node.url,
+        children: _normalizeInlines(node.children),
+        title: node.title,
+      );
+    }
+    return node;
+  }
+
+  /// Merges [a] and [b] when they are the same mergeable wrapper type, else
+  /// returns null. The merged child list is re-normalized to collapse any new
+  /// adjacency created at the seam.
+  Inline? _tryMergeInlines(Inline a, Inline b) {
+    if (a.runtimeType != b.runtimeType) return null;
+    List<Inline> seam(List<Inline> x, List<Inline> y) =>
+        _normalizeInlines([...x, ...y]);
+    if (a is StrongInline && b is StrongInline) {
+      return StrongInline(seam(a.children, b.children));
+    }
+    if (a is EmphInline && b is EmphInline) {
+      return EmphInline(seam(a.children, b.children));
+    }
+    if (a is StrikeInline && b is StrikeInline) {
+      return StrikeInline(seam(a.children, b.children));
+    }
+    if (a is UnderlineInline && b is UnderlineInline) {
+      return UnderlineInline(seam(a.children, b.children));
+    }
+    if (a is SupInline && b is SupInline) {
+      return SupInline(seam(a.children, b.children));
+    }
+    if (a is SubInline && b is SubInline) {
+      return SubInline(seam(a.children, b.children));
+    }
+    if (a is HighlightInline && b is HighlightInline && a.color == b.color) {
+      return HighlightInline(seam(a.children, b.children), color: a.color);
+    }
+    if (a is ColorInline && b is ColorInline && a.color == b.color) {
+      return ColorInline(seam(a.children, b.children), color: a.color);
+    }
+    return null;
+  }
 
   List<String> _renderParagraphLines(
     List<Inline> inlines, {
@@ -650,7 +1082,7 @@ class MarkdownRenderer {
     // Produces multiple lines when encountering LineBreakInline.
     final b = _InlineBuffer();
 
-    for (final node in inlines) {
+    for (final node in _normalizeInlines(inlines)) {
       _emitInline(node, b, canBreak: canBreak);
     }
 
@@ -663,15 +1095,17 @@ class MarkdownRenderer {
     List<Inline> inlines, {
     required bool canBreak,
     required bool breakAsBr,
+    bool renderLinks = true,
   }) {
     final b = _InlineBuffer();
 
-    for (final node in inlines) {
+    for (final node in _normalizeInlines(inlines)) {
       _emitInline(
         node,
         b,
         canBreak: canBreak,
         breakAsBrWhenNoBreakAllowed: breakAsBr,
+        renderLinks: renderLinks,
       );
     }
 
@@ -685,6 +1119,7 @@ class MarkdownRenderer {
     _InlineBuffer out, {
     required bool canBreak,
     bool breakAsBrWhenNoBreakAllowed = true,
+    bool renderLinks = true,
   }) {
     if (node is TextInline) {
       out.write(_escapeMarkdownText(node.text));
@@ -727,42 +1162,44 @@ class MarkdownRenderer {
     }
 
     if (node is LinkInline) {
+      if (!renderLinks) {
+        for (final child in _normalizeInlines(node.children)) {
+          _emitInline(
+            child,
+            out,
+            canBreak: canBreak,
+            breakAsBrWhenNoBreakAllowed: breakAsBrWhenNoBreakAllowed,
+            renderLinks: false,
+          );
+        }
+        return;
+      }
+
       final text = _renderInlineGroupAsText(
         node.children,
         canBreak: false,
         breakAsBr: true,
+        renderLinks: false,
       );
-      final url = config.hooks.rewriteLinkTarget?.call(node.url) ?? node.url;
-      out.write('[${_escapeLinkText(text)}](${_escapeLinkDestination(url)})');
+      final url = _rewriteLinkTarget(node.url, 'inline/link');
+      final destination = _linkDestinationWithTitle(url, node.title);
+      // `text` is already escaped by _renderInlineGroupAsText (and may contain
+      // intentional formatting like **bold**); do not escape it a second time.
+      out.write('[$text]($destination)');
       return;
     }
 
     if (node is ImageInline) {
-      final alt = _escapeLinkText(node.alt);
-      final src0 = config.hooks.rewriteImageTarget?.call(node.src) ?? node.src;
-      final src = _escapeLinkDestination(src0);
-
-      if (config.maxImageWidth > 0 &&
-          config.imageSizeMode != ImageSizeMode.none) {
-        switch (config.imageSizeMode) {
-          case ImageSizeMode.obsidian:
-            out.write('![$alt]($src =${config.maxImageWidth}x)');
-            break;
-          case ImageSizeMode.pandoc:
-            out.write('![$alt]($src){ width=${config.maxImageWidth}px }');
-            break;
-          case ImageSizeMode.none:
-            break;
-        }
-      } else if (config.maxImageWidth > 0) {
-        // If user requested max width, emit HTML <img> for portability.
-        out.write(
-          '<img src="${_escapeHtmlAttr(src0)}" alt="${_escapeHtmlAttr(node.alt)}" '
-          'width="${config.maxImageWidth}"/>',
-        );
-      } else {
-        out.write('![$alt]($src)');
-      }
+      out.write(
+        _renderImageMarkdown(
+          src: node.src,
+          alt: node.alt,
+          title: node.title,
+          widthPx: node.widthPx,
+          heightPx: node.heightPx,
+          contextPath: 'inline/image',
+        ),
+      );
       return;
     }
 
@@ -837,6 +1274,43 @@ class MarkdownRenderer {
       return;
     }
 
+    if (node is HighlightInline) {
+      final inner = _renderInlineGroupAsText(
+        node.children,
+        canBreak: false,
+        breakAsBr: true,
+      );
+      switch (config.highlightMode) {
+        case HighlightMode.none:
+          out.write(inner);
+          return;
+        case HighlightMode.mark:
+          out.write('<mark>$inner</mark>');
+          return;
+      }
+    }
+
+    if (node is ColorInline) {
+      final inner = _renderInlineGroupAsText(
+        node.children,
+        canBreak: false,
+        breakAsBr: true,
+      );
+      switch (config.textColorMode) {
+        case TextColorMode.none:
+          out.write(inner);
+          return;
+        case TextColorMode.htmlSpan:
+          final hex = node.color.startsWith('#')
+              ? node.color
+              : '#${node.color}';
+          out.write(
+            '<span style="color:${_escapeHtmlAttr(hex)}">$inner</span>',
+          );
+          return;
+      }
+    }
+
     // Defensive fallback
     out.write('');
   }
@@ -844,7 +1318,7 @@ class MarkdownRenderer {
   // HTML inline renderer (used for HTML tables)
   String _renderInlineGroupAsHtml(List<Inline> inlines) {
     final sb = StringBuffer();
-    for (final node in inlines) {
+    for (final node in _normalizeInlines(inlines)) {
       sb.write(_renderInlineAsHtml(node));
     }
     return sb.toString();
@@ -875,26 +1349,118 @@ class MarkdownRenderer {
     if (node is SubInline) {
       return '<sub>${_renderInlineGroupAsHtml(node.children)}</sub>';
     }
+    if (node is HighlightInline) {
+      final inner = _renderInlineGroupAsHtml(node.children);
+      return config.highlightMode == HighlightMode.mark
+          ? '<mark>$inner</mark>'
+          : inner;
+    }
+    if (node is ColorInline) {
+      final inner = _renderInlineGroupAsHtml(node.children);
+      if (config.textColorMode == TextColorMode.htmlSpan) {
+        final hex = node.color.startsWith('#') ? node.color : '#${node.color}';
+        return '<span style="color:${_escapeHtmlAttr(hex)}">$inner</span>';
+      }
+      return inner;
+    }
 
     if (node is LinkInline) {
-      final url0 = config.hooks.rewriteLinkTarget?.call(node.url) ?? node.url;
+      final url0 = _rewriteLinkTarget(node.url, 'html/link');
       final url = _escapeHtmlAttr(url0);
       final text = _renderInlineGroupAsHtml(node.children);
-      return '<a href="$url">$text</a>';
+      return '<a href="$url"${_htmlTitleAttr(node.title)}>$text</a>';
     }
 
     if (node is ImageInline) {
-      final src0 = config.hooks.rewriteImageTarget?.call(node.src) ?? node.src;
+      final src0 = _rewriteImageTarget(node.src, 'html/image');
       final src = _escapeHtmlAttr(src0);
       final alt = _escapeHtmlAttr(node.alt);
+      final title = _htmlTitleAttr(node.title);
 
+      final size = _effectiveImageSize(
+        widthPx: node.widthPx,
+        heightPx: node.heightPx,
+      );
       if (config.maxImageWidth > 0) {
-        return '<img src="$src" alt="$alt" width="${config.maxImageWidth}"/>';
+        final width = size.widthPx ?? config.maxImageWidth;
+        return '<img src="$src" alt="$alt"$title width="$width"/>';
       }
-      return '<img src="$src" alt="$alt"/>';
+      return '<img src="$src" alt="$alt"$title/>';
     }
 
     return '';
+  }
+
+  String _renderImageMarkdown({
+    required String src,
+    required String alt,
+    required String? title,
+    required int? widthPx,
+    required int? heightPx,
+    required String contextPath,
+  }) {
+    final escapedAlt = _escapeLinkText(alt);
+    final rewrittenSrc = _rewriteImageTarget(src, contextPath);
+    final destination = _linkDestinationWithTitle(rewrittenSrc, title);
+    final size = _effectiveImageSize(widthPx: widthPx, heightPx: heightPx);
+
+    if (size.hasAny && config.imageSizeMode != ImageSizeMode.none) {
+      switch (config.imageSizeMode) {
+        case ImageSizeMode.obsidian:
+          return '![$escapedAlt]($destination ${_obsidianImageSize(size)})';
+        case ImageSizeMode.pandoc:
+          return '![$escapedAlt]($destination){ ${_pandocImageSize(size)} }';
+        case ImageSizeMode.none:
+          break;
+      }
+    }
+
+    if (config.maxImageWidth > 0) {
+      final titleAttr = _htmlTitleAttr(title);
+      final width = size.widthPx ?? config.maxImageWidth;
+      return '<img src="${_escapeHtmlAttr(rewrittenSrc)}" '
+          'alt="${_escapeHtmlAttr(alt)}"$titleAttr '
+          'width="$width"/>';
+    }
+
+    return '![$escapedAlt]($destination)';
+  }
+
+  _ImageRenderSize _effectiveImageSize({
+    required int? widthPx,
+    required int? heightPx,
+  }) {
+    final maxWidth = config.maxImageWidth;
+    if (maxWidth <= 0) {
+      return _ImageRenderSize(widthPx: widthPx, heightPx: heightPx);
+    }
+    if (widthPx == null || widthPx <= 0) {
+      return _ImageRenderSize(widthPx: maxWidth, heightPx: heightPx);
+    }
+    if (widthPx <= maxWidth) {
+      return _ImageRenderSize(widthPx: widthPx, heightPx: heightPx);
+    }
+    final constrainedHeight = heightPx == null || heightPx <= 0
+        ? null
+        : (heightPx * maxWidth / widthPx).round();
+    return _ImageRenderSize(widthPx: maxWidth, heightPx: constrainedHeight);
+  }
+
+  String _obsidianImageSize(_ImageRenderSize size) {
+    final width = size.widthPx;
+    final height = size.heightPx;
+    if (width != null && height != null) return '=${width}x$height';
+    if (width != null) return '=${width}x';
+    return '=x$height';
+  }
+
+  String _pandocImageSize(_ImageRenderSize size) {
+    final attrs = <String>[];
+    final width = size.widthPx;
+    final height = size.heightPx;
+    if (width != null) attrs.add('width=${width}px');
+    if (height != null) attrs.add('height=${height}px');
+    return attrs.join(' ');
   }
 
   // ---------------------------------------------------------------------------
@@ -972,6 +1538,20 @@ class MarkdownRenderer {
     return '<$safe>';
   }
 
+  String _linkDestinationWithTitle(String url, String? title) {
+    final destination = _escapeLinkDestination(url);
+    if (title == null || title.isEmpty) return destination;
+    return '$destination "${_escapeLinkTitle(title)}"';
+  }
+
+  String _escapeLinkTitle(String title) {
+    final normalized = title
+        .replaceAll('\r\n', ' ')
+        .replaceAll('\n', ' ')
+        .replaceAll('\r', ' ');
+    return normalized.replaceAll('\\', r'\\').replaceAll('"', r'\"');
+  }
+
   String _escapeHtml(String text) {
     return text
         .replaceAll('&', '&amp;')
@@ -982,6 +1562,31 @@ class MarkdownRenderer {
   }
 
   String _escapeHtmlAttr(String text) => _escapeHtml(text);
+
+  String _htmlTitleAttr(String? title) {
+    if (title == null || title.isEmpty) return '';
+    return ' title="${_escapeHtmlAttr(title)}"';
+  }
+
+  HookContext _renderHookContext(String path) {
+    return HookContext(part: 'markdown_renderer', path: path);
+  }
+
+  String _rewriteLinkTarget(String url, String contextPath) {
+    return config.hooks.rewriteLinkTarget?.call(
+          url,
+          _renderHookContext(contextPath),
+        ) ??
+        url;
+  }
+
+  String _rewriteImageTarget(String src, String contextPath) {
+    return config.hooks.rewriteImageTarget?.call(
+          src,
+          _renderHookContext(contextPath),
+        ) ??
+        src;
+  }
 
   String _escapeHtmlComment(String text) {
     var cleaned = text.replaceAll('\n', ' ').replaceAll('\r', ' ').trim();
@@ -1057,9 +1662,36 @@ class MarkdownRenderer {
       return lines.join('\n');
     }
     if (block is TableBlock) {
-      return '[table]';
+      return block.grid.rows
+          .map(
+            (row) => row.cells
+                .map(
+                  (cell) => cell.blocks
+                      .map(_renderBlockAsPlainText)
+                      .where((text) => text.trim().isNotEmpty)
+                      .join(' '),
+                )
+                .where((text) => text.trim().isNotEmpty)
+                .join(' | '),
+          )
+          .where((text) => text.trim().isNotEmpty)
+          .join('\n');
     }
     if (block is HorizontalRuleBlock) return '---';
+    if (block is PageBreakBlock) return '';
+    if (block is DefinitionListBlock) {
+      return block.items
+          .map((it) {
+            final term = _renderInlineGroupAsText(
+              it.term,
+              canBreak: false,
+              breakAsBr: false,
+            );
+            final body = it.definitions.map(_renderBlockAsPlainText).join('\n');
+            return body.isEmpty ? term : '$term\n$body';
+          })
+          .join('\n');
+    }
 
     return '';
   }
@@ -1134,6 +1766,15 @@ class _RenderContext {
     // Trim right so "> " becomes ">" and we don't emit trailing spaces.
     return prefix.trimRight();
   }
+}
+
+class _ImageRenderSize {
+  const _ImageRenderSize({this.widthPx, this.heightPx});
+
+  final int? widthPx;
+  final int? heightPx;
+
+  bool get hasAny => widthPx != null || heightPx != null;
 }
 
 class _LineWriter {
@@ -1217,7 +1858,24 @@ class _LineWriter {
 class _InlineBuffer {
   final List<String> lines = [''];
 
+  // Emphasis delimiters whose runs fuse when two spans abut (e.g. a closing
+  // `**` meeting an opening `*` yields `***`). When that happens we insert an
+  // inert HTML comment, which separates the delimiter runs and renders to
+  // nothing in CommonMark, GFM, and Pandoc.
+  static const _emphasisDelimiters = {'*', '_', '~'};
+
   void write(String s) {
+    if (s.isNotEmpty) {
+      final cur = lines.last;
+      if (cur.isNotEmpty) {
+        final last = cur[cur.length - 1];
+        if (last == s[0] &&
+            _emphasisDelimiters.contains(last) &&
+            !cur.endsWith('\\$last')) {
+          lines[lines.length - 1] = '$cur<!-- -->';
+        }
+      }
+    }
     lines[lines.length - 1] = lines.last + s;
   }
 

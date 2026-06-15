@@ -14,6 +14,7 @@ import 'package:xml/xml.dart';
 
 import 'package:docx_to_markdown/src/config.dart';
 import 'package:docx_to_markdown/src/ir.dart';
+import 'package:docx_to_markdown/src/metadata_parser.dart';
 import 'package:docx_to_markdown/src/ooxml_package.dart';
 import 'package:docx_to_markdown/src/styles.dart';
 
@@ -52,12 +53,15 @@ class DocxParser {
   /// - [styles]: Pre-loaded style definitions for heading/code detection
   /// - [config]: Conversion settings (what to include, how to handle unknowns)
   /// - [mediaMap]: Mapping from internal media paths to output paths
+  /// - [allowUnmappedMediaReferences]: Whether missing media mappings may
+  ///   fall back to the original media filename.
   /// - [onWarning]: Callback for non-fatal issues encountered during parsing
   DocxParser({
     required this.package,
     required this.styles,
     required this.config,
     required this.mediaMap,
+    this.allowUnmappedMediaReferences = true,
     required this.onWarning,
   }) : _numbering = _NumberingModel.fromXml(package.numberingXml),
        _comments = _CommentIndex.fromXml(package.commentsXml);
@@ -75,11 +79,20 @@ class DocxParser {
   /// output paths or URLs for use in the rendered Markdown.
   final Map<String, String> mediaMap;
 
+  /// Whether unresolved media mappings should fall back to source filenames.
+  ///
+  /// This preserves legacy conversion behavior when no image export target is
+  /// provided. When an explicit sink or directory is used, this is disabled so
+  /// skipped or failed image exports do not render broken Markdown references.
+  final bool allowUnmappedMediaReferences;
+
   /// Callback invoked for each non-fatal warning during parsing.
   final WarningSink onWarning;
   final _NumberingModel _numbering;
   final _CommentIndex _comments;
   final List<DocWarning> _warnings = [];
+  Set<String> _bookmarkNames = const <String>{};
+  Set<String> _targetedAnchors = const <String>{};
 
   /// Parses `word/document.xml` and its dependencies into a [Document].
   ///
@@ -93,6 +106,17 @@ class DocxParser {
   /// Throws [DocxPackageException] if critical parts are missing and
   /// [DocxToMarkdownConfig.strict] is `true`.
   Document parseMainDocument() {
+    // Metadata is independent of the body, so parse it first; every return path
+    // below carries it. In strict mode a malformed docProps part throws here.
+    final metadata = parseDocumentMetadata(
+      package,
+      strict: config.strict,
+      onWarning: (w) {
+        _warnings.add(w);
+        onWarning(w);
+      },
+    );
+
     final docXml = package.documentXml;
     if (docXml == null) {
       if (config.strict) {
@@ -106,7 +130,11 @@ class DocxParser {
         message: 'word/document.xml not found',
         location: 'word/document.xml',
       );
-      return Document(blocks: const [], warnings: List.of(_warnings));
+      return Document(
+        blocks: const [],
+        warnings: List.of(_warnings),
+        metadata: metadata,
+      );
     }
 
     final body = _firstDescendantByLocal(docXml, 'body');
@@ -122,10 +150,16 @@ class DocxParser {
         message: 'document.xml missing w:body',
         location: 'word/document.xml',
       );
-      return Document(blocks: const [], warnings: List.of(_warnings));
+      return Document(
+        blocks: const [],
+        warnings: List.of(_warnings),
+        metadata: metadata,
+      );
     }
 
     final mainCtx = _ParseContext(partPath: package.mainDocumentPartPath);
+    _bookmarkNames = _collectBookmarkNames(body);
+    _targetedAnchors = _collectTargetedAnchors(body);
 
     // 1. Parse Headers
     final headerBlocks = <Block>[];
@@ -187,6 +221,7 @@ class DocxParser {
       blocks: hookedBlocks,
       footnotes: hookedFootnotes,
       warnings: List.of(_warnings),
+      metadata: metadata,
     );
   }
 
@@ -229,7 +264,30 @@ class DocxParser {
 
       case 'oMath':
       case 'oMathPara':
-        return [_BlockToken(_parseMathBlock(el, loc: loc), loc: loc)];
+        return [
+          _BlockToken(
+            _parseMathBlock(el, ctx: ctx, loc: loc),
+            loc: loc,
+          ),
+        ];
+
+      case 'bookmarkStart':
+        final name = _attrLocal(el, 'name');
+        if (name != null &&
+            _isNavigableBookmark(name) &&
+            _targetedAnchors.contains(name)) {
+          return [
+            _AnchorToken(
+              name: name,
+              '<a id="${_escapeHtmlAttr(name)}"></a>',
+              loc: loc,
+            ),
+          ];
+        }
+        return const [];
+
+      case 'bookmarkEnd':
+        return const [];
 
       case 'sectPr':
         return const [];
@@ -278,6 +336,24 @@ class DocxParser {
       return [_BlockToken(const HorizontalRuleBlock(), loc: loc)];
     }
 
+    // Explicit page break (w:br type="page"). Only a paragraph whose sole
+    // content is the break becomes a PageBreakBlock; a break embedded in a
+    // paragraph with other content is kept as a line break (mid-paragraph
+    // splitting is deferred) and reported. w:lastRenderedPageBreak (a layout
+    // hint) is always ignored.
+    if (config.pageBreakMode != PageBreakMode.ignore && _hasPageBreak(p)) {
+      if (_isPageBreakOnlyParagraph(p)) {
+        return [_BlockToken(const PageBreakBlock(), loc: loc)];
+      }
+      _warn(
+        code: 'page.break.midparagraph',
+        message:
+            'Page break inside a paragraph with content; kept as a line break. '
+            'Mid-paragraph page-break splitting is not yet supported.',
+        location: loc,
+      );
+    }
+
     final analysis = styles.analyzeParagraphStyle(styleId);
     final override = styleId == null
         ? null
@@ -300,6 +376,27 @@ class DocxParser {
           language: codeLanguage,
         ),
       ];
+    }
+
+    // Definition lists. Paragraphs styled "Definition Term" / "Definition"
+    // (Pandoc reference styles) become definition-list tokens that the builder
+    // groups. Headings, quotes, code and explicit style overrides take
+    // precedence (handled above / guarded here); direct numbering wins so a
+    // genuinely numbered paragraph stays a list.
+    if (numPr == null && !isHeading && !isQuote) {
+      final defRole = styles.definitionRole(styleId);
+      if (defRole != null) {
+        final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
+        final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+        switch (defRole) {
+          case DefinitionRole.term:
+            return [_DefTermToken(inlines, meta: meta, loc: loc)];
+          case DefinitionRole.definition:
+            return [
+              _DefItemToken(ParagraphBlock(inlines, meta: meta), loc: loc),
+            ];
+        }
+      }
     }
 
     // Check for direct numbering properties or style-inherited numbering
@@ -329,7 +426,20 @@ class DocxParser {
         ilvl: effectiveIlvl,
       );
       final ordered = levelInfo?.ordered ?? false;
-      final startOverride = levelInfo?.startOverride; // Fix list restarts
+      final checked = levelInfo?.taskChecked;
+      final markerIsBlank = levelInfo?.markerIsBlank ?? false;
+      // Resolved starting number: an instance lvlOverride/startOverride wins,
+      // otherwise the abstract level's w:start. This only sets where the list
+      // begins - it must not trigger a per-item restart (see _addListItem).
+      final start = levelInfo?.startOverride ?? levelInfo?.start;
+      final numberFormat = levelInfo?.numberFormat ?? ListNumberFormat.decimal;
+      final meta = _paragraphMeta(
+        ctx: ctx,
+        loc: loc,
+        styleId: styleId,
+        numId: effectiveNumId,
+        ilvl: effectiveIlvl,
+      );
 
       final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
 
@@ -339,19 +449,25 @@ class DocxParser {
           ordered: ordered,
           level: math.max(effectiveIlvl, 0),
           numId: effectiveNumId,
-          startOverride: startOverride,
+          start: start,
+          numberFormat: numberFormat,
+          checked: checked,
+          markerIsBlank: markerIsBlank,
+          lvlText: levelInfo?.lvlText,
           loc: loc,
-          itemBlocks: [ParagraphBlock(inlines)],
+          itemBlocks: [ParagraphBlock(inlines, meta: meta)],
         ),
       ];
     }
+
+    final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
 
     if (isHeading && headingLevel > 0) {
       final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
       if (_isInlineListEffectivelyEmpty(inlines)) return const [];
       return [
         _BlockToken(
-          HeadingBlock(level: headingLevel, inlines: inlines),
+          HeadingBlock(level: headingLevel, inlines: inlines, meta: meta),
           loc: loc,
           canContinueList: false,
         ),
@@ -363,7 +479,7 @@ class DocxParser {
       if (_isInlineListEffectivelyEmpty(inlines)) return const [];
       return [
         _BlockToken(
-          QuoteBlock([ParagraphBlock(inlines)]),
+          QuoteBlock([ParagraphBlock(inlines, meta: meta)], meta: meta),
           loc: loc,
           canContinueList: false,
         ),
@@ -378,11 +494,34 @@ class DocxParser {
 
     return [
       _BlockToken(
-        ParagraphBlock(inlines),
+        ParagraphBlock(inlines, meta: meta),
         loc: loc,
         canContinueList: canContinueList,
       ),
     ];
+  }
+
+  NodeMeta _paragraphMeta({
+    required _ParseContext ctx,
+    required String loc,
+    String? styleId,
+    String? numId,
+    int? ilvl,
+  }) {
+    final attrs = <String, Object?>{};
+    if (styleId != null) {
+      attrs['styleId'] = styleId;
+      final styleName = styles.getById(styleId)?.name;
+      if (styleName != null && styleName.isNotEmpty) {
+        attrs['styleName'] = styleName;
+      }
+    }
+    if (numId != null) attrs['numId'] = numId;
+    if (ilvl != null) attrs['ilvl'] = ilvl;
+    return NodeMeta(
+      location: SourceLocation(part: ctx.partPath, path: loc),
+      attributes: attrs,
+    );
   }
 
   // ===========================================================================
@@ -394,7 +533,14 @@ class DocxParser {
     required _ParseContext ctx,
     required String loc,
   }) {
-    return _parseInlineChildren(p, ctx: ctx, loc: loc);
+    final pPr = _firstChildByLocal(p, 'pPr');
+    final styleId = _attrLocal(_firstChildByLocal(pPr, 'pStyle'), 'val');
+    return _parseInlineChildren(
+      p,
+      ctx: ctx,
+      loc: loc,
+      inheritedRunProps: styles.resolveRunPropertiesForStyle(styleId),
+    );
   }
 
   /// Parses child elements into a list of [Inline] nodes.
@@ -407,9 +553,11 @@ class DocxParser {
     XmlElement container, {
     required _ParseContext ctx,
     required String loc,
+    StyleRunProperties? inheritedRunProps,
   }) {
     final out = <Inline>[];
     final activeCommentIds = <String>{};
+    final emittedCommentIds = <String>{};
     final field = _FieldState();
 
     void processChildren(XmlElement node, String parentLoc) {
@@ -424,7 +572,9 @@ class DocxParser {
           out,
           field,
           activeCommentIds,
+          emittedCommentIds,
           processChildren,
+          inheritedRunProps,
         );
       }
     }
@@ -445,7 +595,9 @@ class DocxParser {
     List<Inline> out,
     _FieldState field,
     Set<String> activeCommentIds,
+    Set<String> emittedCommentIds,
     void Function(XmlElement, String) recurse,
+    StyleRunProperties? inheritedRunProps,
   ) {
     void push(Inline i) {
       // NOTE: Removed double hook application here.
@@ -461,6 +613,8 @@ class DocxParser {
           loc: cLoc,
           field: field,
           commentIds: activeCommentIds,
+          emittedCommentIds: emittedCommentIds,
+          inheritedRunProps: inheritedRunProps,
         );
         if (field.isActive && field.inResult) {
           field.displayInlines.addAll(runs);
@@ -475,10 +629,16 @@ class DocxParser {
       // Inline Containers (Recursively Unwrap)
       case 'smartTag':
       case 'customXml':
-      case 'ins':
       case 'bdo':
       case 'dir':
         recurse(child, cLoc);
+        break;
+
+      case 'ins':
+        // Tracked insertion: keep inline unless revisions are rejected.
+        if (config.trackChangesMode != TrackChangesMode.rejectChanges) {
+          recurse(child, cLoc);
+        }
         break;
 
       case 'sdt':
@@ -488,19 +648,29 @@ class DocxParser {
 
       case 'hyperlink':
         if (field.isActive) _finalizeField(out, field, cLoc);
-        final linkInlines = _parseHyperlink(child, ctx: ctx, loc: cLoc);
+        final linkInlines = _parseHyperlink(
+          child,
+          ctx: ctx,
+          loc: cLoc,
+          inheritedRunProps: inheritedRunProps,
+        );
         linkInlines.forEach(push);
         break;
 
       case 'fldSimple':
         if (field.isActive) _finalizeField(out, field, cLoc);
-        final simpleInlines = _parseFldSimple(child, ctx: ctx, loc: cLoc);
+        final simpleInlines = _parseFldSimple(
+          child,
+          ctx: ctx,
+          loc: cLoc,
+          inheritedRunProps: inheritedRunProps,
+        );
         simpleInlines.forEach(push);
         break;
 
       case 'oMath':
         if (field.isActive) _finalizeField(out, field, cLoc);
-        push(_parseMathInline(child, loc: cLoc));
+        push(_parseMathInline(child, ctx: ctx, loc: cLoc));
         break;
 
       case 'commentRangeStart':
@@ -513,32 +683,68 @@ class DocxParser {
       case 'commentRangeEnd':
         if (config.includeComments) {
           final id = _attrLocal(child, 'id');
-          if (id != null && activeCommentIds.remove(id)) {
-            final c = _comments.byId(id);
-            if (c != null) {
-              push(
-                HtmlInline(
-                  '^[${_escapeForComment(c.author)}: ${_escapeForComment(c.text)}]',
-                ),
-              );
-            }
+          if (id != null) {
+            activeCommentIds.remove(id);
+            final comment = _commentInlineForId(id, emittedCommentIds);
+            if (comment != null) push(comment);
+          }
+        }
+        break;
+
+      case 'commentReference':
+        if (config.includeComments) {
+          final id = _attrLocal(child, 'id');
+          if (id != null) {
+            final comment = _commentInlineForId(id, emittedCommentIds);
+            if (comment != null) push(comment);
           }
         }
         break;
 
       case 'bookmarkStart':
         final name = _attrLocal(child, 'name');
-        if (name != null && !name.startsWith('_')) {
+        if (name != null && _isNavigableBookmark(name)) {
           push(HtmlInline('<a id="$name"></a>'));
         }
         break;
 
       case 'del':
-        _warn(
-          code: 'trackChanges.deletionDropped',
-          message: 'Dropped deleted text (w:del).',
-          location: cLoc,
-        );
+        switch (config.trackChangesMode) {
+          case TrackChangesMode.acceptAll:
+            _warn(
+              code: 'trackChanges.deletionDropped',
+              message: 'Dropped deleted text (w:del).',
+              location: cLoc,
+            );
+            break;
+          case TrackChangesMode.rejectChanges:
+            final restored = _delText(child);
+            if (restored.isNotEmpty) push(TextInline(restored));
+            break;
+          case TrackChangesMode.showDeletionsAsStrikethrough:
+            final removed = _delText(child);
+            if (removed.isNotEmpty) {
+              push(StrikeInline([TextInline(removed)]));
+            }
+            break;
+        }
+        break;
+
+      // Property and marker elements never carry inline content. Skipping them
+      // explicitly prevents a whitespace-formatted <w:pPr> (or similar) from
+      // being treated as an unknown inline, which would otherwise leak its
+      // inter-element whitespace into the paragraph text and emit a spurious
+      // `unsupported.inline` warning.
+      case 'pPr':
+      case 'rPr':
+      case 'sectPr':
+      case 'tblPr':
+      case 'trPr':
+      case 'tcPr':
+      case 'tblGrid':
+      case 'bookmarkEnd':
+      case 'proofErr':
+      case 'lastRenderedPageBreak':
         break;
 
       default:
@@ -557,8 +763,12 @@ class DocxParser {
   }
 
   void _finalizeField(List<Inline> out, _FieldState field, String loc) {
-    final result = field.finalizeTop(loc: loc);
+    final result = field.finalizeTop(loc: loc, refExists: _refTargetExists);
     if (result == null) return;
+    final unresolvedRef = result.unresolvedRef;
+    if (unresolvedRef != null) {
+      _warnUnresolvedRef(unresolvedRef, loc);
+    }
 
     final emitted = result.produced != null
         ? <Inline>[result.produced!]
@@ -575,103 +785,113 @@ class DocxParser {
     }
   }
 
+  HtmlInline? _commentInlineForId(String id, Set<String> emittedCommentIds) {
+    if (!emittedCommentIds.add(id)) return null;
+    final comment = _comments.byId(id);
+    if (comment == null) return null;
+    return HtmlInline(
+      '^[${_escapeForComment(comment.author)}: ${_escapeForComment(comment.text)}]',
+    );
+  }
+
   List<Inline> _parseRun(
     XmlElement r, {
     required _ParseContext ctx,
     required String loc,
     required _FieldState field,
     required Set<String> commentIds,
+    required Set<String> emittedCommentIds,
+    required StyleRunProperties? inheritedRunProps,
   }) {
     final out = <Inline>[];
 
-    final fldChar = _firstChildByLocal(r, 'fldChar');
-    if (fldChar != null) {
-      final type = _attrLocal(fldChar, 'fldCharType');
-      if (type == 'begin') {
-        field.begin(loc: loc);
-        return const [];
-      }
-      if (type == 'separate') {
-        field.separate(loc: loc);
-        return const [];
-      }
-      if (type == 'end') {
-        field.end(loc: loc);
-        return const [];
-      }
-    }
-
-    final instrText = _firstChildByLocal(r, 'instrText');
-    if (instrText != null && field.isActive && !field.inResult) {
-      final t = instrText.innerText;
-      if (t.isNotEmpty) field.appendInstr(t);
-      return const [];
-    }
-
-    if (config.includeFootnotes) {
-      final fnRef = _firstChildByLocal(r, 'footnoteReference');
-      if (fnRef != null) {
-        final id = _attrLocal(fnRef, 'id');
-        if (id != null) {
-          return [FootnoteRefInline(id)];
-        }
-      }
-    }
-
-    if (config.includeEndnotes) {
-      final enRef = _firstChildByLocal(r, 'endnoteReference');
-      if (enRef != null) {
-        final id = _attrLocal(enRef, 'id');
-        if (id != null) {
-          return [FootnoteRefInline('endnote:$id')];
-        }
-      }
-    }
-
-    final drawing = _firstChildByLocal(r, 'drawing');
-    if (drawing != null) {
-      final extracted = _parseDrawingAsInline(
-        drawing,
-        ctx: ctx,
-        loc: '$loc:drawing',
-      );
-      if (extracted != null) return extracted;
-    }
-
-    final pict = _firstChildByLocal(r, 'pict');
-    if (pict != null) {
-      final img = _parseVmlImage(pict, ctx: ctx, loc: '$loc:pict');
-      if (img != null) return [img];
-    }
-
-    final sym = _firstChildByLocal(r, 'sym');
-    if (sym != null) {
-      final charHex = _attrLocal(sym, 'char');
-      final decoded = _decodeHexChar(charHex);
-      if (decoded != null) {
-        out.add(TextInline(decoded));
-      }
-    }
-
     final rPr = _firstChildByLocal(r, 'rPr');
+    final runStyleId = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
+    final runMeta = _runMeta(ctx: ctx, loc: loc, styleId: runStyleId);
+    final runProps = _effectiveRunProperties(
+      rPr,
+      inheritedRunProps: inheritedRunProps,
+    );
 
-    for (final child in r.children.whereType<XmlElement>()) {
+    final children = r.children.whereType<XmlElement>().toList();
+    for (var i = 0; i < children.length; i++) {
+      final child = children[i];
+      final childLoc = '$loc:${child.name.local}[$i]';
       switch (child.name.local) {
+        case 'fldChar':
+          final type = _attrLocal(child, 'fldCharType');
+          if (type == 'begin') {
+            field.begin(loc: childLoc);
+          } else if (type == 'separate') {
+            field.separate(loc: childLoc);
+          } else if (type == 'end') {
+            field.end(loc: childLoc);
+          }
+          break;
+        case 'instrText':
+          if (field.isActive && !field.inResult) {
+            final text = child.innerText;
+            if (text.isNotEmpty) field.appendInstr(text);
+          }
+          break;
+        case 'footnoteReference':
+          if (config.includeFootnotes) {
+            final id = _attrLocal(child, 'id');
+            if (id != null) out.add(FootnoteRefInline(id));
+          }
+          break;
+        case 'endnoteReference':
+          if (config.includeEndnotes) {
+            final id = _attrLocal(child, 'id');
+            if (id != null) out.add(FootnoteRefInline('endnote:$id'));
+          }
+          break;
+        case 'commentReference':
+          if (config.includeComments) {
+            final id = _attrLocal(child, 'id');
+            if (id != null) {
+              final comment = _commentInlineForId(id, emittedCommentIds);
+              if (comment != null) out.add(comment);
+            }
+          }
+          break;
+        case 'drawing':
+          final extracted = _parseDrawingAsInline(
+            child,
+            ctx: ctx,
+            loc: childLoc,
+          );
+          if (extracted != null) out.addAll(extracted);
+          break;
+        case 'pict':
+          final img = _parseVmlImage(child, ctx: ctx, loc: childLoc);
+          if (img != null) out.add(img);
+          break;
+        case 'sym':
+          final decoded = _decodeHexChar(_attrLocal(child, 'char'));
+          if (decoded != null) out.add(TextInline(decoded, meta: runMeta));
+          break;
         case 't':
           final text = child.innerText;
           if (text.isEmpty) break;
-          out.add(_applyRunFormatting(TextInline(text), rPr: rPr, loc: loc));
+          out.add(
+            _applyRunFormatting(
+              TextInline(text, meta: runMeta),
+              rPr: rPr,
+              props: runProps,
+            ),
+          );
           break;
         case 'tab':
         case 'ptab':
-          out.add(const TextInline('\t'));
+          out.add(TextInline('\t', meta: runMeta));
           break;
         case 'br':
         case 'cr':
           out.add(const LineBreakInline());
           break;
         case 'noBreakHyphen':
-          out.add(const TextInline('-'));
+          out.add(TextInline('-', meta: runMeta));
           break;
         default:
           break;
@@ -679,68 +899,225 @@ class DocxParser {
     }
 
     if (out.isEmpty) {
-      final txt = r.findAllElements('w:t').map((e) => e.innerText).join();
+      final txt = r.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 't')
+          .map((e) => e.innerText)
+          .join();
       if (txt.isNotEmpty) {
-        out.add(_applyRunFormatting(TextInline(txt), rPr: rPr, loc: loc));
+        out.add(
+          _applyRunFormatting(
+            TextInline(txt, meta: runMeta),
+            rPr: rPr,
+            props: runProps,
+          ),
+        );
       }
     }
 
     return out;
   }
 
+  NodeMeta? _runMeta({
+    required _ParseContext ctx,
+    required String loc,
+    String? styleId,
+  }) {
+    if (styleId == null) return null;
+    final attrs = <String, Object?>{'styleId': styleId};
+    final styleName = styles.getById(styleId)?.name;
+    if (styleName != null && styleName.isNotEmpty) {
+      attrs['styleName'] = styleName;
+    }
+    return NodeMeta(
+      location: SourceLocation(part: ctx.partPath, path: loc),
+      attributes: attrs,
+    );
+  }
+
   Inline _applyRunFormatting(
     Inline base, {
     required XmlElement? rPr,
-    required String loc,
+    required StyleRunProperties? props,
   }) {
-    if (rPr == null) return base;
-
-    if (_isCodeRun(rPr)) {
-      if (base case TextInline(:final text)) {
-        return CodeInline(text);
-      }
-      return HtmlInline(_inlineToPlainText(base));
-    }
-
-    final bold = _isOnOff(rPr, 'b');
-    final italic = _isOnOff(rPr, 'i');
-    final strike = _firstChildByLocal(rPr, 'strike') != null;
-    final underline = _firstChildByLocal(rPr, 'u') != null;
-
-    final vertAlign = _attrLocal(_firstChildByLocal(rPr, 'vertAlign'), 'val');
+    if (props == null && rPr == null) return base;
 
     Inline node = base;
 
-    if (underline) node = UnderlineInline([node]);
-    if (strike) node = StrikeInline([node]);
-    if (italic) node = EmphInline([node]);
-    if (bold) node = StrongInline([node]);
+    // Inline code (monospace font/shading, or a monospace character style) is
+    // the innermost wrapper so emphasis and sub/superscript compose around it
+    // instead of being dropped (e.g. a superscripted `2` in a Verbatim run
+    // must render as `<sup>`2`</sup>`, not a bare `2`).
+    final isCode = _isCodeRun(rPr, props: props);
+    if (isCode) {
+      if (node case TextInline(:final text)) {
+        node = CodeInline(text, meta: node.meta);
+      } else {
+        node = HtmlInline(_inlineToPlainText(node), meta: node.meta);
+      }
+    }
 
-    if (vertAlign == 'subscript') node = SubInline([node]);
-    if (vertAlign == 'superscript') node = SupInline([node]);
+    final bold = props?.bold == true;
+    final italic = props?.italic == true;
+    final strike = props?.strike == true;
+    final underline = props?.underline == true;
+    final vertAlign = props?.vertAlign;
+
+    if (underline) node = UnderlineInline([node], meta: node.meta);
+    if (strike) node = StrikeInline([node], meta: node.meta);
+    if (italic) node = EmphInline([node], meta: node.meta);
+    if (bold) node = StrongInline([node], meta: node.meta);
+
+    if (vertAlign == 'subscript') node = SubInline([node], meta: node.meta);
+    if (vertAlign == 'superscript') node = SupInline([node], meta: node.meta);
+
+    // Highlight (w:highlight) and text color (w:color) wrap the formatted run.
+    // They are always parsed into the IR for fidelity; the renderer drops them
+    // when the corresponding mode is `none` (mirroring UnderlineMode.ignore).
+    // Code takes precedence over these treatments: a run rendered as inline
+    // code (including a shaded run via treatShadedRunsAsCode) is not also
+    // wrapped in highlight/color, since w:shd and w:highlight share the same
+    // background/color channel.
+    if (!isCode) {
+      final color = props?.color;
+      if (color != null && color.isNotEmpty) {
+        node = ColorInline([node], color: color, meta: node.meta);
+      }
+      final highlight = props?.highlight;
+      if (highlight != null && highlight.isNotEmpty) {
+        node = HighlightInline([node], color: highlight, meta: node.meta);
+      }
+    }
 
     return node;
   }
 
-  bool _isOnOff(XmlElement rPr, String childLocalName) {
-    final el = _firstChildByLocal(rPr, childLocalName);
-    if (el == null) return false;
-    final v = _attrLocal(el, 'val');
-    return v == null || v.toLowerCase() != 'false' && v != '0';
+  StyleRunProperties? _effectiveRunProperties(
+    XmlElement? rPr, {
+    required StyleRunProperties? inheritedRunProps,
+  }) {
+    var effective = inheritedRunProps;
+    if (rPr == null) return effective;
+
+    final rStyle = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
+    final styleProps = styles.resolveRunPropertiesForStyle(rStyle);
+    if (styleProps != null) {
+      effective = effective == null ? styleProps : effective.merge(styleProps);
+    }
+
+    final directProps = _parseDirectRunProperties(rPr);
+    if (directProps != null) {
+      effective = effective == null
+          ? directProps
+          : effective.merge(directProps);
+    }
+
+    return effective;
   }
 
-  bool _isCodeRun(XmlElement rPr) {
-    final fonts = _firstChildByLocal(rPr, 'rFonts');
-    final ascii = _attrLocal(fonts, 'ascii');
-    final hAnsi = _attrLocal(fonts, 'hAnsi');
-    final cs = _attrLocal(fonts, 'cs');
-    if (_fontLooksMonospace(ascii) ||
-        _fontLooksMonospace(hAnsi) ||
-        _fontLooksMonospace(cs)) {
+  StyleRunProperties? _parseDirectRunProperties(XmlElement rPr) {
+    final rFonts = _firstChildByLocal(rPr, 'rFonts');
+    final ascii = _attrLocal(rFonts, 'ascii');
+    final hAnsi = _attrLocal(rFonts, 'hAnsi');
+    final cs = _attrLocal(rFonts, 'cs');
+
+    final shadingEl = _firstChildByLocal(rPr, 'shd');
+    final hasShading = _parseShading(shadingEl);
+    final bold = _parseAnyOnOff(rPr, const ['b', 'bCs']);
+    final italic = _parseAnyOnOff(rPr, const ['i', 'iCs']);
+    final strike = _parseAnyOnOff(rPr, const ['strike', 'dstrike']);
+    final underline = _parseOnOff(_firstChildByLocal(rPr, 'u'));
+
+    final vertAlignEl = _firstChildByLocal(rPr, 'vertAlign');
+    final vertAlign = _attrLocal(vertAlignEl, 'val');
+
+    final colorEl = _firstChildByLocal(rPr, 'color');
+    final rawColor = _attrLocal(colorEl, 'val');
+    final color = rawColor == null || rawColor.toLowerCase() == 'auto'
+        ? null
+        : rawColor;
+
+    final highlightEl = _firstChildByLocal(rPr, 'highlight');
+    final rawHighlight = _attrLocal(highlightEl, 'val');
+    final highlight =
+        rawHighlight == null || rawHighlight.toLowerCase() == 'none'
+        ? null
+        : rawHighlight;
+
+    if (ascii == null &&
+        hAnsi == null &&
+        cs == null &&
+        shadingEl == null &&
+        bold == null &&
+        italic == null &&
+        strike == null &&
+        underline == null &&
+        vertAlignEl == null &&
+        colorEl == null &&
+        highlightEl == null) {
+      return null;
+    }
+
+    return StyleRunProperties(
+      asciiFont: ascii,
+      hAnsiFont: hAnsi,
+      csFont: cs,
+      hasShading: hasShading,
+      shadingIsSet: shadingEl != null,
+      bold: bold,
+      italic: italic,
+      strike: strike,
+      underline: underline,
+      vertAlign: vertAlign,
+      vertAlignIsSet: vertAlignEl != null,
+      color: color,
+      colorIsSet: colorEl != null,
+      highlight: highlight,
+      highlightIsSet: highlightEl != null,
+    );
+  }
+
+  bool? _parseAnyOnOff(XmlElement rPr, Iterable<String> childLocalNames) {
+    var sawExplicitOff = false;
+    for (final name in childLocalNames) {
+      final parsed = _parseOnOff(_firstChildByLocal(rPr, name));
+      if (parsed == true) return true;
+      if (parsed == false) sawExplicitOff = true;
+    }
+    return sawExplicitOff ? false : null;
+  }
+
+  bool? _parseOnOff(XmlElement? el) {
+    if (el == null) return null;
+    final v = _attrLocal(el, 'val');
+    if (v == null) return true;
+    final normalized = v.trim().toLowerCase();
+    return normalized != 'false' &&
+        normalized != '0' &&
+        normalized != 'off' &&
+        normalized != 'none';
+  }
+
+  bool _parseShading(XmlElement? el) {
+    if (el == null) return false;
+    final v = _attrLocal(el, 'val')?.trim().toLowerCase();
+    return v != 'nil';
+  }
+
+  bool _isCodeRun(XmlElement? rPr, {required StyleRunProperties? props}) {
+    if (_fontLooksMonospace(props?.asciiFont) ||
+        _fontLooksMonospace(props?.hAnsiFont) ||
+        _fontLooksMonospace(props?.csFont)) {
       return true;
     }
-    if (config.treatShadedRunsAsCode &&
-        _firstChildByLocal(rPr, 'shd') != null) {
+    if (config.treatShadedRunsAsCode && (props?.hasShading ?? false)) {
+      return true;
+    }
+    // A character style (w:rStyle) can carry the monospace font instead of an
+    // inline w:rFonts. Pandoc/Word emit inline code via a "Verbatim Char"
+    // character style (Consolas), so resolve it through the style chain.
+    final rStyle = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
+    if (rStyle != null && styles.isCodeCharacterStyle(rStyle)) {
       return true;
     }
     return false;
@@ -759,16 +1136,34 @@ class DocxParser {
     return false;
   }
 
+  /// Whether a bookmark name is a navigable cross-reference target.
+  ///
+  /// Word emits internal scaffolding bookmarks prefixed with `_`, but its
+  /// cross-reference (`_Ref`), table-of-contents (`_Toc`), and hyperlink
+  /// (`_Hlk`) anchors are real navigation targets that REF/PAGEREF link to.
+  bool _isNavigableBookmark(String name) {
+    if (!name.startsWith('_')) return true;
+    return name.startsWith('_Ref') ||
+        name.startsWith('_Toc') ||
+        name.startsWith('_Hlk');
+  }
+
   List<Inline> _parseHyperlink(
     XmlElement hyperlink, {
     required _ParseContext ctx,
     required String loc,
+    required StyleRunProperties? inheritedRunProps,
   }) {
     final rid = _attrLocal(hyperlink, 'id');
     final anchor = _attrLocal(hyperlink, 'anchor');
 
     // Recursively parse children (could contain runs with formatting)
-    final children = _parseInlineChildren(hyperlink, ctx: ctx, loc: loc);
+    final children = _parseInlineChildren(
+      hyperlink,
+      ctx: ctx,
+      loc: loc,
+      inheritedRunProps: inheritedRunProps,
+    );
 
     if (children.isEmpty) return const [];
 
@@ -791,15 +1186,22 @@ class DocxParser {
     XmlElement fldSimple, {
     required _ParseContext ctx,
     required String loc,
+    required StyleRunProperties? inheritedRunProps,
   }) {
     final instr = _attrLocal(fldSimple, 'instr');
     if (instr == null || instr.isEmpty) return const [];
 
     final url = _extractHyperlinkUrl(instr);
     final anchor = _extractHyperlinkAnchor(instr);
+    final ref = _extractRefBookmark(instr);
 
     // Recursively parse children
-    final children = _parseInlineChildren(fldSimple, ctx: ctx, loc: loc);
+    final children = _parseInlineChildren(
+      fldSimple,
+      ctx: ctx,
+      loc: loc,
+      inheritedRunProps: inheritedRunProps,
+    );
 
     if (children.isEmpty) {
       if (url != null) {
@@ -812,6 +1214,15 @@ class DocxParser {
           LinkInline(url: '#$anchor', children: [TextInline(anchor)]),
         ];
       }
+      if (ref != null) {
+        if (_refTargetExists(ref)) {
+          return [
+            LinkInline(url: '#$ref', children: [TextInline(ref)]),
+          ];
+        }
+        _warnUnresolvedRef(ref, loc);
+        return [TextInline(ref)];
+      }
       return const [];
     }
 
@@ -821,8 +1232,29 @@ class DocxParser {
     if (anchor != null) {
       return [LinkInline(url: '#$anchor', children: children)];
     }
+    if (ref != null) {
+      if (_refTargetExists(ref)) {
+        return [LinkInline(url: '#$ref', children: children)];
+      }
+      _warnUnresolvedRef(ref, loc);
+      return children;
+    }
 
     return children;
+  }
+
+  bool _refTargetExists(String bookmarkName) {
+    return _bookmarkNames.contains(bookmarkName) &&
+        _isNavigableBookmark(bookmarkName);
+  }
+
+  void _warnUnresolvedRef(String bookmarkName, String loc) {
+    _warn(
+      code: 'fieldcode.unresolved',
+      message:
+          'Unresolved REF/PAGEREF field target "$bookmarkName"; kept display text.',
+      location: loc,
+    );
   }
 
   List<Inline>? _parseDrawingAsInline(
@@ -838,16 +1270,34 @@ class DocxParser {
       // PART-AWARE RESOLUTION
       final src = _resolveMediaTarget(embed, ctx: ctx);
       if (src != null) {
-        final alt =
-            drawing.descendants
-                .whereType<XmlElement>()
-                .firstWhereOrNull((e) => e.name.local == 'cNvPr')
-                ?.attributes
-                .firstWhereOrNull((a) => a.name.local == 'descr')
-                ?.value ??
-            'Image';
+        final docPr = drawing.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'docPr');
+        final cNvPr = drawing.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'cNvPr');
+        final alt = _firstNonEmptyAttr([
+          _attrLocal(docPr, 'descr'),
+          _attrLocal(cNvPr, 'descr'),
+        ], fallback: 'Image');
 
-        return [ImageInline(src: src, alt: alt)];
+        // `wp:docPr/@title` is Word's "Alt Text" title field. ImageInline renders
+        // it as a Markdown link title: `![alt](src "title")`.
+        final rawTitle = _attrLocal(docPr, 'title');
+        final title = (rawTitle != null && rawTitle.isNotEmpty)
+            ? rawTitle
+            : null;
+        final dimensions = _readDrawingExtentPx(drawing);
+
+        return [
+          ImageInline(
+            src: src,
+            alt: alt,
+            title: title,
+            widthPx: dimensions.widthPx,
+            heightPx: dimensions.heightPx,
+          ),
+        ];
       }
     }
 
@@ -904,8 +1354,30 @@ class DocxParser {
     final src = _resolveMediaTarget(rid, ctx: ctx);
     if (src == null) return null;
 
+    // Legacy VML stores an optional title on `v:imagedata/@o:title`.
+    final rawTitle = _attrLocal(imgData, 'title');
+    final title = (rawTitle != null && rawTitle.isNotEmpty) ? rawTitle : null;
     final alt = 'Image';
-    return ImageInline(src: src, alt: alt);
+    return ImageInline(src: src, alt: alt, title: title);
+  }
+
+  ({int? widthPx, int? heightPx}) _readDrawingExtentPx(XmlElement drawing) {
+    final extent = drawing.descendants.whereType<XmlElement>().firstWhereOrNull(
+      (e) =>
+          e.name.local == 'extent' &&
+          _attrLocal(e, 'cx') != null &&
+          _attrLocal(e, 'cy') != null,
+    );
+    return (
+      widthPx: _emuToPx(_attrLocal(extent, 'cx')),
+      heightPx: _emuToPx(_attrLocal(extent, 'cy')),
+    );
+  }
+
+  int? _emuToPx(String? value) {
+    final emu = int.tryParse(value ?? '');
+    if (emu == null || emu <= 0) return null;
+    return (emu * 96 / 914400).round();
   }
 
   // ===========================================================================
@@ -1175,16 +1647,30 @@ class DocxParser {
   // Math
   // ===========================================================================
 
-  Block _parseMathBlock(XmlElement math, {required String loc}) {
+  Block _parseMathBlock(
+    XmlElement math, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
     final latex =
-        config.hooks.ommlToLatex?.call(math.toXmlString()) ??
+        config.hooks.ommlToLatex?.call(
+          math.toXmlString(),
+          HookContext(part: ctx.partPath, path: loc),
+        ) ??
         _OmmlToLatex.convert(math);
     return MathBlock(latex);
   }
 
-  Inline _parseMathInline(XmlElement math, {required String loc}) {
+  Inline _parseMathInline(
+    XmlElement math, {
+    required _ParseContext ctx,
+    required String loc,
+  }) {
     final latex =
-        config.hooks.ommlToLatex?.call(math.toXmlString()) ??
+        config.hooks.ommlToLatex?.call(
+          math.toXmlString(),
+          HookContext(part: ctx.partPath, path: loc),
+        ) ??
         _OmmlToLatex.convert(math);
     return HtmlInline('\$$latex\$');
   }
@@ -1379,6 +1865,14 @@ class DocxParser {
     return sb.toString();
   }
 
+  /// Extracts the text of a `w:del` deletion. Word stores deleted runs in
+  /// `w:delText`; we also accept `w:t` for lenient inputs.
+  String _delText(XmlElement del) => del.descendants
+      .whereType<XmlElement>()
+      .where((e) => e.name.local == 'delText' || e.name.local == 't')
+      .map((e) => e.innerText)
+      .join();
+
   bool _isInlineListEffectivelyEmpty(List<Inline> inlines) {
     if (inlines.isEmpty) return true;
     final txt = _inlineListToPlainText(inlines).trim();
@@ -1409,6 +1903,25 @@ class DocxParser {
     return false;
   }
 
+  bool _hasPageBreak(XmlElement p) => p.descendants.whereType<XmlElement>().any(
+    (e) => e.name.local == 'br' && _attrLocal(e, 'type') == 'page',
+  );
+
+  /// True when the only meaningful content of [p] is page break(s): no
+  /// non-whitespace text and no embedded drawings or objects.
+  bool _isPageBreakOnlyParagraph(XmlElement p) {
+    final hasText = p.descendants.whereType<XmlElement>().any(
+      (e) => e.name.local == 't' && e.innerText.trim().isNotEmpty,
+    );
+    if (hasText) return false;
+    return !p.descendants.whereType<XmlElement>().any(
+      (e) =>
+          e.name.local == 'drawing' ||
+          e.name.local == 'pict' ||
+          e.name.local == 'object',
+    );
+  }
+
   int? _readIndentLeftTwips(XmlElement? pPr) {
     final ind = _firstChildByLocal(pPr, 'ind');
     if (ind == null) return null;
@@ -1417,6 +1930,8 @@ class DocxParser {
   }
 
   String? _resolveMediaTarget(String rId, {required _ParseContext ctx}) {
+    if (!config.extractImages) return null;
+
     // PART-AWARE
     final target = package.resolveRelTarget(ctx.partPath, rId);
     if (target == null || target.isEmpty) return null;
@@ -1437,6 +1952,7 @@ class DocxParser {
     final partPath = t.startsWith('word/') ? t : 'word/$t';
     final mapped = mediaMap[partPath];
     if (mapped != null && mapped.isNotEmpty) return mapped;
+    if (!allowUnmappedMediaReferences) return null;
     return t.split('/').last;
   }
 
@@ -1456,17 +1972,21 @@ class DocxParser {
     final normalized = switch (block) {
       ParagraphBlock() => ParagraphBlock(
         _applyHooksToInlines(block.inlines, loc: '$loc:para'),
+        meta: block.meta,
       ),
       HeadingBlock() => HeadingBlock(
         level: block.level,
         inlines: _applyHooksToInlines(block.inlines, loc: '$loc:heading'),
+        meta: block.meta,
       ),
       QuoteBlock() => QuoteBlock(
         _applyHooksToBlocks(block.blocks, baseLoc: '$loc:quote'),
+        meta: block.meta,
       ),
       ListBlock() => ListBlock(
         ordered: block.ordered,
         start: block.start,
+        numberFormat: block.numberFormat,
         tightness: block.tightness,
         items: block.items
             .mapIndexed(
@@ -1475,9 +1995,27 @@ class DocxParser {
                   it.blocks,
                   baseLoc: '$loc:listItem[$idx]',
                 ),
+                checked: it.checked,
+                meta: it.meta,
               ),
             )
             .toList(),
+        meta: block.meta,
+      ),
+      DefinitionListBlock() => DefinitionListBlock(
+        items: block.items
+            .mapIndexed(
+              (idx, it) => DefinitionListItem(
+                term: _applyHooksToInlines(it.term, loc: '$loc:defTerm[$idx]'),
+                definitions: _applyHooksToBlocks(
+                  it.definitions,
+                  baseLoc: '$loc:defItem[$idx]',
+                ),
+                meta: it.meta,
+              ),
+            )
+            .toList(),
+        meta: block.meta,
       ),
       TableBlock() => TableBlock(
         grid: TableGrid(
@@ -1494,6 +2032,7 @@ class DocxParser {
                           colSpan: cell.colSpan,
                           rowSpan: cell.rowSpan,
                           isHeader: cell.isHeader,
+                          meta: cell.meta,
                         ),
                       )
                       .toList(),
@@ -1503,12 +2042,13 @@ class DocxParser {
               .toList(),
         ),
         alignments: block.alignments,
+        meta: block.meta,
       ),
       _ => block,
     };
     final transformed = config.hooks.transformBlock?.call(
       normalized,
-      HookContext(location: loc),
+      _hookContextForNode(normalized, loc),
     );
     return transformed ?? normalized;
   }
@@ -1529,33 +2069,67 @@ class DocxParser {
     final normalized = switch (node) {
       StrongInline() => StrongInline(
         _applyHooksToInlines(node.children, loc: '$loc:strong'),
+        meta: node.meta,
       ),
       EmphInline() => EmphInline(
         _applyHooksToInlines(node.children, loc: '$loc:emph'),
+        meta: node.meta,
       ),
       StrikeInline() => StrikeInline(
         _applyHooksToInlines(node.children, loc: '$loc:strike'),
+        meta: node.meta,
       ),
       UnderlineInline() => UnderlineInline(
         _applyHooksToInlines(node.children, loc: '$loc:underline'),
+        meta: node.meta,
       ),
       LinkInline() => LinkInline(
         url: node.url,
         children: _applyHooksToInlines(node.children, loc: '$loc:link'),
+        title: node.title,
+        meta: node.meta,
       ),
       SupInline() => SupInline(
         _applyHooksToInlines(node.children, loc: '$loc:sup'),
+        meta: node.meta,
       ),
       SubInline() => SubInline(
         _applyHooksToInlines(node.children, loc: '$loc:sub'),
+        meta: node.meta,
+      ),
+      HighlightInline() => HighlightInline(
+        _applyHooksToInlines(node.children, loc: '$loc:highlight'),
+        color: node.color,
+        meta: node.meta,
+      ),
+      ColorInline() => ColorInline(
+        _applyHooksToInlines(node.children, loc: '$loc:color'),
+        color: node.color,
+        meta: node.meta,
       ),
       _ => node,
     };
     return config.hooks.transformInline?.call(
           normalized,
-          HookContext(location: loc),
+          _hookContextForNode(normalized, loc),
         ) ??
         normalized;
+  }
+
+  HookContext _hookContextForNode(DocNode node, String loc) {
+    final meta = node.meta;
+    final attrs = meta?.attributes ?? const <String, Object?>{};
+    final source = meta?.location;
+    final styleId = attrs['styleId'];
+    final ilvl = attrs['ilvl'];
+    return HookContext(
+      part: source?.part ?? '',
+      path: source?.path ?? loc,
+      styleId: styleId is String ? styleId : null,
+      listLevel: ilvl is int ? ilvl : null,
+      meta: attrs,
+      location: source?.toString() ?? loc,
+    );
   }
 
   void _warn({
@@ -1598,6 +2172,18 @@ class DocxParser {
     return a?.value;
   }
 
+  String _firstNonEmptyAttr(
+    Iterable<String?> values, {
+    required String fallback,
+  }) {
+    for (final value in values) {
+      if (value == null) continue;
+      final trimmed = value.trim();
+      if (trimmed.isNotEmpty) return trimmed;
+    }
+    return fallback;
+  }
+
   String? _decodeHexChar(String? hex) {
     if (hex == null) return null;
     final cleaned = hex.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
@@ -1629,6 +2215,8 @@ class DocxParser {
     UnderlineInline() => _inlineListToPlainText(i.children),
     SupInline() => _inlineListToPlainText(i.children),
     SubInline() => _inlineListToPlainText(i.children),
+    HighlightInline() => _inlineListToPlainText(i.children),
+    ColorInline() => _inlineListToPlainText(i.children),
     HtmlInline() => i.html,
     _ => '',
   };
@@ -1650,9 +2238,12 @@ class DocxParser {
     for (final i in inlines) {
       if (i is TextInline) {
         if (pending == null) {
-          pending = TextInline(i.text);
+          pending = i;
+        } else if (pending!.meta == i.meta) {
+          pending = TextInline('${pending!.text}${i.text}', meta: i.meta);
         } else {
-          pending = TextInline('${pending!.text}${i.text}');
+          flush();
+          pending = i;
         }
       } else {
         flush();
@@ -1709,6 +2300,18 @@ class DocxParser {
         case MathBlock():
           sb.write('<span class="math">${_escapeHtml(b.latexOrText)}</span>');
           break;
+        case DefinitionListBlock():
+          sb.write('<dl>');
+          for (final it in b.items) {
+            sb.write(
+              '<dt>${_escapeHtml(_inlineListToPlainText(it.term))}</dt>',
+            );
+            if (it.definitions.isNotEmpty) {
+              sb.write('<dd>${_renderBlocksAsHtml(it.definitions)}</dd>');
+            }
+          }
+          sb.write('</dl>');
+          break;
         default:
           break;
       }
@@ -1721,6 +2324,47 @@ class DocxParser {
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
         .replaceAll('>', '&gt;');
+  }
+
+  String _escapeHtmlAttr(String s) {
+    return _escapeHtml(s).replaceAll('"', '&quot;');
+  }
+
+  Set<String> _collectTargetedAnchors(XmlElement body) {
+    final anchors = <String>{};
+    for (final el in body.descendants.whereType<XmlElement>()) {
+      if (el.name.local == 'hyperlink') {
+        final anchor = _attrLocal(el, 'anchor');
+        if (anchor != null && anchor.isNotEmpty) anchors.add(anchor);
+      }
+      if (el.name.local == 'fldSimple') {
+        _collectAnchorsFromInstr(_attrLocal(el, 'instr'), anchors);
+      }
+      if (el.name.local == 'instrText') {
+        _collectAnchorsFromInstr(el.innerText, anchors);
+      }
+    }
+    return anchors;
+  }
+
+  Set<String> _collectBookmarkNames(XmlElement body) {
+    final names = <String>{};
+    for (final el in body.descendants.whereType<XmlElement>()) {
+      if (el.name.local != 'bookmarkStart') continue;
+      final name = _attrLocal(el, 'name');
+      if (name != null && name.isNotEmpty) names.add(name);
+    }
+    return names;
+  }
+
+  void _collectAnchorsFromInstr(String? instr, Set<String> anchors) {
+    if (instr == null || instr.isEmpty) return;
+    final hyperlinkAnchor = _extractHyperlinkAnchor(instr);
+    if (hyperlinkAnchor != null && hyperlinkAnchor.isNotEmpty) {
+      anchors.add(hyperlinkAnchor);
+    }
+    final refAnchor = _extractRefBookmark(instr);
+    if (refAnchor != null && refAnchor.isNotEmpty) anchors.add(refAnchor);
   }
 }
 
@@ -1742,7 +2386,11 @@ class _ListItemToken extends _Token {
     required this.ordered,
     required this.level,
     required this.numId,
-    this.startOverride, // New
+    this.start,
+    this.numberFormat = ListNumberFormat.decimal,
+    this.checked,
+    this.markerIsBlank = false,
+    this.lvlText,
     required this.itemBlocks,
     required this.loc,
   });
@@ -1750,7 +2398,15 @@ class _ListItemToken extends _Token {
   final bool ordered;
   final int level;
   final String numId;
-  final int? startOverride;
+
+  /// The resolved starting number for this level (instance restart override if
+  /// present, else the abstract `w:start`). Sets the list's first number only;
+  /// it never forces a per-item restart.
+  final int? start;
+  final ListNumberFormat numberFormat;
+  final bool? checked;
+  final bool markerIsBlank;
+  final String? lvlText;
   final List<Block> itemBlocks;
   final String loc;
 }
@@ -1767,6 +2423,30 @@ class _CodeLineToken extends _Token {
   final int? continuationIndentTwips;
   final String? language;
 }
+
+class _AnchorToken extends _Token {
+  _AnchorToken(this.html, {required this.name, required this.loc});
+  final String name;
+  final String html;
+  final String loc;
+}
+
+/// A "Definition Term" paragraph: opens a new [DefinitionListItem].
+class _DefTermToken extends _Token {
+  _DefTermToken(this.term, {required this.meta, required this.loc});
+  final List<Inline> term;
+  final NodeMeta? meta;
+  final String loc;
+}
+
+/// A "Definition" paragraph: a block of the current term's definition body.
+class _DefItemToken extends _Token {
+  _DefItemToken(this.block, {required this.loc});
+  final Block block;
+  final String loc;
+}
+
+typedef _PendingAnchor = ({String name, String html});
 
 // ============================================================================
 // Builder nodes (mutable) -> converted to immutable IR Blocks at the end.
@@ -1785,11 +2465,19 @@ final class _BLeaf implements _BNode {
 }
 
 final class _BList implements _BNode {
-  _BList({required this.ordered, required this.start, required this.tightness});
+  _BList({
+    required this.ordered,
+    required this.start,
+    required this.numberFormat,
+    required this.tightness,
+    this.meta,
+  });
 
   bool ordered;
   int start;
+  ListNumberFormat numberFormat;
   ListTightness tightness;
+  NodeMeta? meta;
 
   final List<_BListItem> items = [];
 
@@ -1798,22 +2486,26 @@ final class _BList implements _BNode {
     return ListBlock(
       ordered: ordered,
       start: start,
+      numberFormat: numberFormat,
       tightness: tightness,
       items: items.map((it) => it.toListItem()).toList(growable: false),
+      meta: meta,
     );
   }
 }
 
 final class _BListItem {
-  _BListItem({Iterable<_BNode> blocks = const []}) {
+  _BListItem({Iterable<_BNode> blocks = const [], this.checked}) {
     this.blocks.addAll(blocks);
   }
 
+  final bool? checked;
   final List<_BNode> blocks = [];
 
   ListItem toListItem() {
     return ListItem(
       blocks: blocks.map((b) => b.toBlock()).toList(growable: false),
+      checked: checked,
     );
   }
 }
@@ -1822,6 +2514,26 @@ final class _BListEntry {
   _BListEntry({required this.list, required this.numId});
   final _BList list;
   final String numId;
+}
+
+/// Accumulates definition-list items (term + body blocks) until flushed.
+final class _BDefList implements _BNode {
+  final List<_BDefItem> items = [];
+
+  @override
+  Block toBlock() => DefinitionListBlock(
+    items: items.map((it) => it.toItem()).toList(growable: false),
+  );
+}
+
+final class _BDefItem {
+  _BDefItem({required this.term, this.meta});
+  final List<Inline> term;
+  final NodeMeta? meta;
+  final List<Block> definitions = [];
+
+  DefinitionListItem toItem() =>
+      DefinitionListItem(term: term, definitions: definitions, meta: meta);
 }
 
 final class _CodeAccumulator {
@@ -1849,7 +2561,9 @@ class _TokenBuilder {
   final DocxToMarkdownConfig config;
   final List<_BNode> _top = [];
   final List<_BListEntry> _listStack = [];
+  final List<_PendingAnchor> _pendingAnchors = [];
   _CodeAccumulator? _code;
+  _BDefList? _defList;
 
   List<Block> get outputBlocks =>
       _top.map((n) => n.toBlock()).toList(growable: false);
@@ -1862,29 +2576,86 @@ class _TokenBuilder {
 
   void finish() {
     _flushCode();
+    _flushDefList();
     _closeAllLists();
+    _flushPendingAnchorsTo(_top);
   }
 
   void _consume(_Token t) {
     switch (t) {
       case _ListItemToken():
         _flushCode();
+        _flushDefList();
         _addListItem(t);
         return;
       case _CodeLineToken():
+        _flushDefList();
         _handleCodeLine(t);
+        return;
+      case _AnchorToken():
+        _flushCode();
+        _flushDefList();
+        _pendingAnchors.add((name: t.name, html: t.html));
+        return;
+      case _DefTermToken():
+        _flushCode();
+        _closeAllLists();
+        _flushPendingAnchorsTo(_top);
+        _startDefTerm(t);
+        return;
+      case _DefItemToken():
+        _flushCode();
+        _closeAllLists();
+        _addDefItem(t);
         return;
       case _BlockToken():
         if (_listStack.isNotEmpty && t.canContinueList) {
           _flushCode();
-          _currentListItemBlocks().add(_BLeaf(t.block));
+          _addBlockToCurrentListItem(t.block);
           return;
         }
         _flushCode();
+        _flushDefList();
         _closeAllLists();
+        _flushPendingAnchorsTo(_top, beforeBlock: t.block);
         _top.add(_BLeaf(t.block));
         return;
     }
+  }
+
+  /// Opens a new definition-list item for [t]'s term, creating the list if
+  /// needed. Consecutive terms each start their own item; the definition body
+  /// is attached by following [_DefItemToken]s.
+  void _startDefTerm(_DefTermToken t) {
+    (_defList ??= _BDefList()).items.add(_BDefItem(term: t.term, meta: t.meta));
+  }
+
+  /// Adds a definition body block to the current term. An orphan definition
+  /// (no preceding term) degrades to a normal block so no text is lost, and a
+  /// warning is emitted.
+  void _addDefItem(_DefItemToken t) {
+    final dl = _defList;
+    if (dl == null || dl.items.isEmpty) {
+      warn(
+        code: 'definitionList.orphanDefinition',
+        message:
+            'Definition paragraph has no preceding term; '
+            'rendered as a normal paragraph.',
+        location: t.loc,
+      );
+      _flushPendingAnchorsTo(_top, beforeBlock: t.block);
+      _top.add(_BLeaf(t.block));
+      return;
+    }
+    dl.items.last.definitions.add(t.block);
+  }
+
+  void _flushDefList() {
+    final dl = _defList;
+    if (dl == null) return;
+    _defList = null;
+    if (dl.items.isEmpty) return;
+    _top.add(dl);
   }
 
   void _handleCodeLine(_CodeLineToken t) {
@@ -1933,26 +2704,39 @@ class _TokenBuilder {
       _listStack.removeLast();
     }
 
-    // Check for restart (change of numId) or explicit startOverride at the same level
+    if (t.markerIsBlank &&
+        _listStack.length == level + 1 &&
+        _currentListHasItem()) {
+      _addBlocksToCurrentListItem(t.itemBlocks);
+      return;
+    }
+
+    // Ordered lists restart when the numbering instance (numId) changes.
+    // Unordered lists do not carry visible numbering state, and Word often
+    // swaps bullet numIds only to vary glyph definitions. Keep adjacent bullets
+    // at the same level together unless a real non-list block interrupts them.
     if (_listStack.length == level + 1) {
       final top = _listStack.last;
-      bool restart = top.numId != t.numId;
-      if (!restart && t.startOverride != null) restart = true;
-
-      if (restart) _listStack.removeLast();
+      final sameListKind = top.list.ordered == t.ordered;
+      final numIdRequiresRestart = t.ordered && top.numId != t.numId;
+      if (!sameListKind || numIdRequiresRestart) _listStack.removeLast();
     }
 
     // Open missing list levels
     while (_listStack.length < level + 1) {
-      final ordered = (_listStack.length == level) ? t.ordered : false;
-      final start = (t.startOverride != null && _listStack.length == level)
-          ? t.startOverride!
-          : 1;
+      final atItemLevel = _listStack.length == level;
+      final ordered = atItemLevel ? t.ordered : false;
+      final start = (t.start != null && atItemLevel) ? t.start! : 1;
+      final numberFormat = atItemLevel
+          ? t.numberFormat
+          : ListNumberFormat.decimal;
 
       final listBlock = _BList(
         ordered: ordered,
         start: start,
+        numberFormat: numberFormat,
         tightness: ListTightness.auto,
+        meta: atItemLevel ? _listMetaForToken(t, level) : null,
       );
 
       if (_listStack.isEmpty) {
@@ -1964,8 +2748,79 @@ class _TokenBuilder {
       _listStack.add(_BListEntry(list: listBlock, numId: t.numId));
     }
 
-    final item = _BListItem(blocks: t.itemBlocks.map((b) => _BLeaf(b)));
+    final itemBlocks = _consumePendingAnchorsIntoListItem(t.itemBlocks);
+    final item = _BListItem(
+      blocks: itemBlocks.map((b) => _BLeaf(b)),
+      checked: t.checked,
+    );
     _listStack.last.list.items.add(item);
+  }
+
+  NodeMeta _listMetaForToken(_ListItemToken token, int level) {
+    final attrs = <String, Object?>{'numId': token.numId, 'ilvl': level};
+    final lvlText = token.lvlText;
+    if (lvlText != null) attrs['lvlText'] = lvlText;
+    return NodeMeta(attributes: attrs);
+  }
+
+  bool _currentListHasItem() {
+    if (_listStack.isEmpty) return false;
+    final items = _listStack.last.list.items;
+    return items.isNotEmpty;
+  }
+
+  void _addBlockToCurrentListItem(Block block) {
+    _addBlocksToCurrentListItem([block]);
+  }
+
+  void _addBlocksToCurrentListItem(List<Block> blocks) {
+    final itemBlocks = _currentListItemBlocks();
+    if (_pendingAnchors.isEmpty) {
+      itemBlocks.addAll(blocks.map((b) => _BLeaf(b)));
+      return;
+    }
+    final resolvedBlocks = _consumePendingAnchorsIntoListItem(blocks);
+    itemBlocks.addAll(resolvedBlocks.map((b) => _BLeaf(b)));
+  }
+
+  List<Block> _consumePendingAnchorsIntoListItem(List<Block> blocks) {
+    if (_pendingAnchors.isEmpty) return blocks;
+    final anchorInlines = _pendingAnchors
+        .map<Inline>((anchor) => HtmlInline(anchor.html))
+        .toList(growable: false);
+    final anchorHtml = _pendingAnchors.map((anchor) => anchor.html).join();
+    _pendingAnchors.clear();
+
+    if (blocks.isEmpty) return [HtmlBlock(anchorHtml)];
+    final first = blocks.first;
+    if (first is ParagraphBlock) {
+      return [
+        ParagraphBlock([...anchorInlines, ...first.inlines], meta: first.meta),
+        ...blocks.skip(1),
+      ];
+    }
+    return [HtmlBlock(anchorHtml), ...blocks];
+  }
+
+  void _flushPendingAnchorsTo(List<_BNode> container, {Block? beforeBlock}) {
+    if (_pendingAnchors.isEmpty) return;
+    final anchors = beforeBlock is HeadingBlock
+        ? _pendingAnchors
+              .where(
+                (anchor) =>
+                    !_bookmarkSatisfiedByHeading(anchor.name, beforeBlock),
+              )
+              .toList(growable: false)
+        : List<_PendingAnchor>.of(_pendingAnchors);
+    if (anchors.isNotEmpty) {
+      container.add(_BLeaf(HtmlBlock(anchors.map((a) => a.html).join())));
+    }
+    _pendingAnchors.clear();
+  }
+
+  bool _bookmarkSatisfiedByHeading(String bookmarkName, HeadingBlock heading) {
+    return _githubHeadingSlug(_plainTextForHeadingSlug(heading.inlines)) ==
+        bookmarkName;
   }
 
   void _closeAllLists() {
@@ -1979,6 +2834,73 @@ class _TokenBuilder {
     }
     return list.items.last.blocks;
   }
+}
+
+String _plainTextForHeadingSlug(List<Inline> inlines) {
+  final buffer = StringBuffer();
+  for (final inline in inlines) {
+    switch (inline) {
+      case TextInline():
+        buffer.write(inline.text);
+      case CodeInline():
+        buffer.write(inline.text);
+      case LineBreakInline():
+      case SoftBreakInline():
+        buffer.write(' ');
+      case FootnoteRefInline():
+        break;
+      case ImageInline():
+        buffer.write(inline.alt);
+      case LinkInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case StrongInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case EmphInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case StrikeInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case UnderlineInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case SupInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case SubInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case HighlightInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case ColorInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case HtmlInline():
+        break;
+    }
+  }
+  return buffer.toString();
+}
+
+String _githubHeadingSlug(String text) {
+  final buffer = StringBuffer();
+  var lastWasSpace = false;
+  for (final rune in text.trim().toLowerCase().runes) {
+    final char = String.fromCharCode(rune);
+    if (char.trim().isEmpty) {
+      if (!lastWasSpace && buffer.isNotEmpty) {
+        buffer.write('-');
+        lastWasSpace = true;
+      }
+      continue;
+    }
+    if (char == '-' || char == '_' || _isSlugLetterOrDigit(rune)) {
+      buffer.write(char);
+      lastWasSpace = false;
+    }
+  }
+  final slug = buffer.toString();
+  return slug.endsWith('-') ? slug.substring(0, slug.length - 1) : slug;
+}
+
+bool _isSlugLetterOrDigit(int rune) {
+  return (rune >= 0x30 && rune <= 0x39) ||
+      (rune >= 0x61 && rune <= 0x7A) ||
+      rune > 0x7F;
 }
 
 enum _VMergeType { none, restart, continueCell }
@@ -2042,8 +2964,15 @@ class _NumberingModel {
                 .firstWhereOrNull((a) => a.name.local == 'val')
                 ?.value ??
             'bullet';
-
-        // Start override check
+        final lvlText = lvl.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'lvlText')
+            ?.attributes
+            .firstWhereOrNull((a) => a.name.local == 'val')
+            ?.value;
+        // The abstract level's starting number (w:lvl/w:start). This only sets
+        // where the list begins; it must NOT be treated as a restart signal
+        // (genuine restarts arrive as instance lvlOverride/startOverride below).
         final start = lvl.descendants
             .whereType<XmlElement>()
             .firstWhereOrNull((e) => e.name.local == 'start')
@@ -2052,9 +2981,11 @@ class _NumberingModel {
             ?.value;
         final startInt = int.tryParse(start ?? '');
 
-        // NOTE: Real w:lvlOverride logic would happen inside 'num' element traversal, not abstractNum.
-        // For simplicity we assume start in abstract level is default.
-        levelMap[ilvl] = _LevelInfo(numFmt: numFmt, startOverride: startInt);
+        levelMap[ilvl] = _LevelInfo(
+          numFmt: numFmt,
+          lvlText: lvlText,
+          start: startInt,
+        );
       }
       m._abstractLevels[absId] = levelMap;
     }
@@ -2108,14 +3039,53 @@ class _NumberingModel {
     if (info == null) return null;
     final override = _instanceOverrides[numId]?[ilvl];
     if (override == null) return info;
-    return _LevelInfo(numFmt: info.numFmt, startOverride: override);
+    return _LevelInfo(
+      numFmt: info.numFmt,
+      lvlText: info.lvlText,
+      start: info.start,
+      startOverride: override,
+    );
   }
 }
 
 class _LevelInfo {
-  _LevelInfo({required this.numFmt, this.startOverride});
+  _LevelInfo({
+    required this.numFmt,
+    this.lvlText,
+    this.start,
+    this.startOverride,
+  });
   final String numFmt;
+  final String? lvlText;
+
+  /// The abstract level's starting number (`w:lvl/w:start`). Present on most
+  /// ordered lists; it sets where the list begins and is NOT a restart signal.
+  final int? start;
+
+  /// An instance restart override (`w:num/w:lvlOverride/w:startOverride`).
+  /// Distinct from [start] so that an ordinary `w:start` is never mistaken for
+  /// a mid-list restart.
   final int? startOverride;
+
+  bool get markerIsBlank {
+    final text = lvlText;
+    return text != null && text.trim().isEmpty;
+  }
+
+  bool? get taskChecked {
+    switch (lvlText?.trim()) {
+      case '☐':
+      case '□':
+        return false;
+      case '☒':
+      case '☑':
+      case '✓':
+      case '✔':
+        return true;
+      default:
+        return null;
+    }
+  }
 
   bool get ordered {
     final f = numFmt.toLowerCase();
@@ -2125,6 +3095,25 @@ class _LevelInfo {
     if (f == 'upperletter' || f == 'lowerletter') return true;
     if (f == 'upperroman' || f == 'lowerroman') return true;
     return false;
+  }
+
+  /// Maps the OOXML `w:numFmt` value to an IR [ListNumberFormat].
+  ///
+  /// Unrecognized or decimal-like formats fall back to
+  /// [ListNumberFormat.decimal].
+  ListNumberFormat get numberFormat {
+    switch (numFmt.toLowerCase()) {
+      case 'lowerletter':
+        return ListNumberFormat.lowerAlpha;
+      case 'upperletter':
+        return ListNumberFormat.upperAlpha;
+      case 'lowerroman':
+        return ListNumberFormat.lowerRoman;
+      case 'upperroman':
+        return ListNumberFormat.upperRoman;
+      default:
+        return ListNumberFormat.decimal;
+    }
   }
 }
 
@@ -2148,17 +3137,58 @@ class _CommentIndex {
               .firstWhereOrNull((a) => a.name.local == 'author')
               ?.value ??
           'Unknown';
-      final text = c.descendants
-          .whereType<XmlElement>()
-          .where((e) => e.name.local == 't')
-          .map((e) => e.innerText)
-          .join();
+      final text = _commentBodyText(c);
       map[id] = _CommentData(author: author, text: text.trim());
     }
     return _CommentIndex(map);
   }
 
   _CommentData? byId(String id) => _byId[id];
+
+  static String _commentBodyText(XmlElement comment) {
+    final paragraphs = comment.children
+        .whereType<XmlElement>()
+        .where((e) => e.name.local == 'p')
+        .toList();
+    if (paragraphs.isEmpty) return _commentTextFromContainer(comment).trim();
+
+    return paragraphs
+        .map((p) => _commentTextFromContainer(p).trim())
+        .where((text) => text.isNotEmpty)
+        .join('\n');
+  }
+
+  static String _commentTextFromContainer(XmlElement container) {
+    final buffer = StringBuffer();
+
+    void walk(XmlNode node) {
+      if (node is! XmlElement) return;
+      switch (node.name.local) {
+        case 't':
+        case 'delText':
+          buffer.write(node.innerText);
+          return;
+        case 'tab':
+        case 'ptab':
+          buffer.write('\t');
+          return;
+        case 'br':
+        case 'cr':
+          buffer.write('\n');
+          return;
+        case 'annotationRef':
+        case 'commentReference':
+          return;
+        default:
+          for (final child in node.children) {
+            walk(child);
+          }
+      }
+    }
+
+    walk(container);
+    return buffer.toString();
+  }
 }
 
 class _CommentData {
@@ -2204,6 +3234,19 @@ String? _extractHyperlinkAnchor(String instr) {
   return _hyperlinkAnchorRe.firstMatch(instr)?.group(1);
 }
 
+/// Matches a REF or PAGEREF cross-reference field, capturing the bookmark name.
+///
+/// The word boundary prevents the `REF` alternative from matching inside
+/// `PAGEREF`; the character class stops before field switches like `\h`.
+final _refFieldRe = RegExp(
+  r'\b(?:REF|PAGEREF)\s+"?([^\s"\\]+)',
+  caseSensitive: false,
+);
+
+/// Extracts the target bookmark name from a REF/PAGEREF field instruction.
+String? _extractRefBookmark(String instr) =>
+    _refFieldRe.firstMatch(instr)?.group(1);
+
 class _FieldState {
   final List<_FieldEntry> _stack = [];
 
@@ -2232,7 +3275,10 @@ class _FieldState {
     _stack.last.instr.write(t);
   }
 
-  _FieldResult? finalizeTop({required String loc}) {
+  _FieldResult? finalizeTop({
+    required String loc,
+    required bool Function(String bookmarkName) refExists,
+  }) {
     if (!isActive) return null;
     final entry = _stack.removeLast();
     final s = entry.instr.toString();
@@ -2240,6 +3286,7 @@ class _FieldState {
     final anchor = _extractHyperlinkAnchor(s);
 
     Inline? produced;
+    String? unresolvedRef;
     if (url != null) {
       final children = entry.displayInlines.isEmpty
           ? [TextInline(url)]
@@ -2250,11 +3297,24 @@ class _FieldState {
           ? [TextInline(anchor)]
           : entry.displayInlines;
       produced = LinkInline(url: '#$anchor', children: children);
+    } else {
+      final ref = _extractRefBookmark(s);
+      if (ref != null) {
+        final children = entry.displayInlines.isEmpty
+            ? [TextInline(ref)]
+            : entry.displayInlines;
+        if (refExists(ref)) {
+          produced = LinkInline(url: '#$ref', children: children);
+        } else {
+          unresolvedRef = ref;
+        }
+      }
     }
 
     return _FieldResult(
       produced: produced,
       displayInlines: entry.displayInlines,
+      unresolvedRef: unresolvedRef,
     );
   }
 }
@@ -2267,9 +3327,14 @@ class _FieldEntry {
 }
 
 class _FieldResult {
-  _FieldResult({required this.produced, required this.displayInlines});
+  _FieldResult({
+    required this.produced,
+    required this.displayInlines,
+    required this.unresolvedRef,
+  });
   final Inline? produced;
   final List<Inline> displayInlines;
+  final String? unresolvedRef;
 }
 
 // ============================================================================
@@ -2294,24 +3359,118 @@ class _OmmlToLatex {
         break;
       case 'f':
         sb.write(r'\frac{');
-        _child(n, 'num', sb);
+        _writeChild(n, 'num', sb);
         sb.write(r'}{');
-        _child(n, 'den', sb);
+        _writeChild(n, 'den', sb);
         sb.write(r'}');
         break;
-      case 'sup':
+      case 'sSup':
+        _writeChild(n, 'e', sb);
         sb.write(r'^{');
-        _child(n, 'sup', sb);
+        _writeChild(n, 'sup', sb);
         sb.write(r'}');
         break;
-      case 'sub':
+      case 'sSub':
+        _writeChild(n, 'e', sb);
         sb.write(r'_{');
-        _child(n, 'sub', sb);
+        _writeChild(n, 'sub', sb);
+        sb.write(r'}');
+        break;
+      case 'sSubSup':
+        _writeChild(n, 'e', sb);
+        sb.write(r'_{');
+        _writeChild(n, 'sub', sb);
+        sb.write(r'}^{');
+        _writeChild(n, 'sup', sb);
         sb.write(r'}');
         break;
       case 'rad':
-        sb.write(r'\sqrt{');
-        _child(n, 'e', sb);
+        final degree = _renderChild(n, 'deg');
+        if (degree.isEmpty) {
+          sb.write(r'\sqrt{');
+        } else {
+          sb.write(r'\sqrt[');
+          sb.write(degree);
+          sb.write(r']{');
+        }
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'nary':
+        final naryPr = _childEl(n, 'naryPr');
+        sb.write(_naryOp(_attrVal(_childEl(naryPr, 'chr')) ?? '∫'));
+        if (_attrVal(_childEl(naryPr, 'subHide')) != '1') {
+          final sub = _renderChild(n, 'sub');
+          if (sub.isNotEmpty) sb.write('_{$sub}');
+        }
+        if (_attrVal(_childEl(naryPr, 'supHide')) != '1') {
+          final sup = _renderChild(n, 'sup');
+          if (sup.isNotEmpty) sb.write('^{$sup}');
+        }
+        sb.write(r'{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'd':
+        final dPr = _childEl(n, 'dPr');
+        sb.write('\\left${_delimLatex(dPr, 'begChr', '(')} ');
+        final es = _childEls(n, 'e').toList();
+        final sep = _delimLatex(dPr, 'sepChr', '|');
+        for (var i = 0; i < es.length; i++) {
+          if (i > 0) sb.write(sep);
+          _walk(es[i], sb);
+        }
+        sb.write(' \\right${_delimLatex(dPr, 'endChr', ')')}');
+        break;
+      case 'm':
+        sb.write(r'\begin{matrix}');
+        final rows = _childEls(n, 'mr').toList();
+        for (var r = 0; r < rows.length; r++) {
+          final cells = _childEls(rows[r], 'e').toList();
+          for (var c = 0; c < cells.length; c++) {
+            if (c > 0) sb.write(' & ');
+            _walk(cells[c], sb);
+          }
+          if (r < rows.length - 1) sb.write(r' \\ ');
+        }
+        sb.write(r'\end{matrix}');
+        break;
+      case 'acc':
+        sb.write(_accentCmd(_attrVal(_childEl(_childEl(n, 'accPr'), 'chr'))));
+        sb.write(r'{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'bar':
+        final barPos = _attrVal(_childEl(_childEl(n, 'barPr'), 'pos'));
+        sb.write(barPos == 'bot' ? r'\underline{' : r'\overline{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'groupChr':
+        final gPr = _childEl(n, 'groupChrPr');
+        final under =
+            (_attrVal(_childEl(gPr, 'pos')) ?? 'bot') != 'top' &&
+            _attrVal(_childEl(gPr, 'chr')) != '⏞';
+        sb.write(under ? r'\underbrace{' : r'\overbrace{');
+        _writeChild(n, 'e', sb);
+        sb.write(r'}');
+        break;
+      case 'func':
+        _writeChild(n, 'fName', sb);
+        sb.write(' ');
+        _writeChild(n, 'e', sb);
+        break;
+      case 'limLow':
+        _writeChild(n, 'e', sb);
+        sb.write(r'_{');
+        _writeChild(n, 'lim', sb);
+        sb.write(r'}');
+        break;
+      case 'limUpp':
+        _writeChild(n, 'e', sb);
+        sb.write(r'^{');
+        _writeChild(n, 'lim', sb);
         sb.write(r'}');
         break;
       default:
@@ -2321,12 +3480,126 @@ class _OmmlToLatex {
     }
   }
 
-  static void _child(XmlElement p, String n, StringBuffer sb) {
-    final c = p.children.whereType<XmlElement>().firstWhereOrNull(
-      (e) => e.name.local == n,
+  static String _renderChild(XmlElement parent, String localName) {
+    final sb = StringBuffer();
+    _writeChild(parent, localName, sb);
+    return sb.toString();
+  }
+
+  static void _writeChild(
+    XmlElement parent,
+    String localName,
+    StringBuffer sb,
+  ) {
+    final child = parent.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == localName,
     );
-    if (c != null) {
-      _walk(c, sb);
+    if (child != null) {
+      _walk(child, sb);
+    }
+  }
+
+  static XmlElement? _childEl(XmlElement? parent, String localName) {
+    if (parent == null) return null;
+    return parent.children.whereType<XmlElement>().firstWhereOrNull(
+      (e) => e.name.local == localName,
+    );
+  }
+
+  static Iterable<XmlElement> _childEls(XmlElement parent, String localName) {
+    return parent.children.whereType<XmlElement>().where(
+      (e) => e.name.local == localName,
+    );
+  }
+
+  static String? _attrVal(XmlElement? el, [String localName = 'val']) {
+    if (el == null) return null;
+    return el.attributes
+        .firstWhereOrNull((a) => a.name.local == localName)
+        ?.value;
+  }
+
+  /// Maps an OMML n-ary operator character to its LaTeX command.
+  static String _naryOp(String chr) {
+    switch (chr) {
+      case '∑':
+        return r'\sum';
+      case '∏':
+        return r'\prod';
+      case '∐':
+        return r'\coprod';
+      case '∫':
+        return r'\int';
+      case '∬':
+        return r'\iint';
+      case '∭':
+        return r'\iiint';
+      case '∮':
+        return r'\oint';
+      case '⋀':
+        return r'\bigwedge';
+      case '⋁':
+        return r'\bigvee';
+      case '⋂':
+        return r'\bigcap';
+      case '⋃':
+        return r'\bigcup';
+      default:
+        return r'\int';
+    }
+  }
+
+  /// Maps an OMML accent character to its LaTeX accent command.
+  static String _accentCmd(String? chr) {
+    switch (chr) {
+      case '̃': // combining tilde
+        return r'\tilde';
+      case '̄': // combining macron
+      case '̅': // combining overline
+        return r'\bar';
+      case '̇': // combining dot above
+        return r'\dot';
+      case '̈': // combining diaeresis
+        return r'\ddot';
+      case '⃗': // combining right arrow above
+        return r'\vec';
+      case '̌': // combining caron
+        return r'\check';
+      case '̆': // combining breve
+        return r'\breve';
+      default: // combining circumflex (OMML default) and unknowns
+        return r'\hat';
+    }
+  }
+
+  /// Maps an OMML delimiter character to a LaTeX-safe delimiter.
+  static String _delimLatex(XmlElement? pr, String attr, String fallback) {
+    final raw = _attrVal(_childEl(pr, attr)) ?? fallback;
+    switch (raw) {
+      case '':
+        return '.';
+      case '{':
+        return r'\{';
+      case '}':
+        return r'\}';
+      case '|':
+        return '|';
+      case '‖':
+        return r'\|';
+      case '⟨':
+        return r'\langle';
+      case '⟩':
+        return r'\rangle';
+      case '⌈':
+        return r'\lceil';
+      case '⌉':
+        return r'\rceil';
+      case '⌊':
+        return r'\lfloor';
+      case '⌋':
+        return r'\rfloor';
+      default:
+        return raw;
     }
   }
 }

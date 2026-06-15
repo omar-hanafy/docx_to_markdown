@@ -18,6 +18,9 @@ void main() {
   <w:style w:type="paragraph" w:styleId="QuoteStyle">
     <w:name w:val="Intense Quote"/>
   </w:style>
+  <w:style w:type="paragraph" w:styleId="BlockText">
+    <w:name w:val="Block Text"/>
+  </w:style>
   <w:style w:type="paragraph" w:styleId="ListBase">
     <w:name w:val="List Base"/>
     <w:pPr>
@@ -48,6 +51,9 @@ void main() {
 
       final quote = reg.analyzeParagraphStyle('QuoteStyle');
       expect(quote.isQuote, isTrue);
+
+      final blockText = reg.analyzeParagraphStyle('BlockText');
+      expect(blockText.isQuote, isTrue);
     });
 
     test('resolves numbering via basedOn chain', () {

@@ -128,6 +128,14 @@ void main() {
       expect(pkg.readPartBytes('word/missing.xml'), isNull);
     });
 
+    test('openBytes wraps corrupt zip errors', () {
+      final bytes = Uint8List.fromList([0x50, 0x4B, 0x03, 0x04, 0x00]);
+      expect(
+        () => DocxPackage.openBytes(bytes),
+        throwsA(isA<DocxPackageException>()),
+      );
+    });
+
     test('openFile supports streaming', () async {
       final bytes = buildDocxBytes(
         documentXml: docXmlWithBody(wP(text: 'Hello')),
@@ -206,6 +214,73 @@ void main() {
       expect(map.keys, contains('word/media/image1.png'));
       final filePath = '${dir.path}/${map['word/media/image1.png']}';
       expect(File(filePath).existsSync(), isTrue);
+    });
+
+    test('mediaAssets exposes bytes and stable metadata', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Media')),
+        media: {
+          'word/media/image1.png': Uint8List.fromList([1, 2, 3]),
+        },
+      );
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      final asset = pkg.mediaAssets().single;
+      expect(asset.partPath, 'word/media/image1.png');
+      expect(asset.suggestedFilename, 'image1_1.png');
+      expect(asset.contentType, 'image/png');
+      expect(asset.bytes, [1, 2, 3]);
+    });
+
+    test('resolves core/custom property parts via root rels', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Hi')),
+        coreXml:
+            '<cp:coreProperties '
+            'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:title>Hello</dc:title></cp:coreProperties>',
+        customXml:
+            '<Properties '
+            'xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties">'
+            '</Properties>',
+      );
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      expect(pkg.corePropertiesPartPath, 'docProps/core.xml');
+      expect(pkg.customPropertiesPartPath, 'docProps/custom.xml');
+      expect(pkg.corePropertiesXml, isNotNull);
+      expect(pkg.customPropertiesXml, isNotNull);
+      expect(pkg.corePropertiesXml!.toXmlString(), contains('Hello'));
+    });
+
+    test('falls back to conventional docProps path without a rel', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(wP(text: 'Hi')),
+        extraXmlParts: {
+          'docProps/core.xml':
+              '<cp:coreProperties '
+              'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"/>',
+        },
+      );
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      expect(pkg.corePropertiesPartPath, 'docProps/core.xml');
+      expect(pkg.customPropertiesPartPath, isNull);
+    });
+
+    test('core/custom property parts are null when absent', () async {
+      final bytes = buildDocxBytes(documentXml: docXmlWithBody(wP(text: 'Hi')));
+      final pkg = DocxPackage.openBytes(bytes);
+      addTearDown(pkg.close);
+
+      expect(pkg.corePropertiesPartPath, isNull);
+      expect(pkg.customPropertiesPartPath, isNull);
+      expect(pkg.corePropertiesXml, isNull);
+      expect(pkg.customPropertiesXml, isNull);
     });
 
     test('canonicalizes part paths to posix style', () async {
