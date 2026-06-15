@@ -9,8 +9,6 @@
 - two
   * three
     + four
-
     + Sub paragraph
 - Same list
-
 - Different list adjacent to the one above.

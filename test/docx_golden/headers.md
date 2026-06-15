@@ -8,7 +8,7 @@ Some plain text.
 
 Some more plain text.
 
-#### Fourth level
+#### *Fourth level*
 
 Some more plain text.
 
@@ -16,7 +16,7 @@ Some more plain text.
 
 Some more plain text.
 
-###### Sixth level
+###### *Sixth level*
 
 Some more plain text.
 

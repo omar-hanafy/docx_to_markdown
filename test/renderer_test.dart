@@ -691,6 +691,29 @@ World
       expect(markdown.trim(), r'[ref\_fig**bold**](#ref_target)');
     });
 
+    test('flattens nested links inside link text', () {
+      final doc = Document(
+        blocks: [
+          ParagraphBlock([
+            LinkInline(
+              url: '#outer',
+              children: [
+                const TextInline('Section '),
+                LinkInline(url: '#inner', children: [const TextInline('1')]),
+              ],
+            ),
+          ]),
+        ],
+      );
+
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+
+      expect(markdown.trim(), '[Section 1](#outer)');
+      expect(markdown, isNot(contains('](#inner)')));
+    });
+
     test('renders image blocks with rewrite hooks', () {
       String? hookLocation;
       final doc = Document(

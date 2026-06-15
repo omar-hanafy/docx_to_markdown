@@ -80,6 +80,7 @@ class DocxParser {
   final _NumberingModel _numbering;
   final _CommentIndex _comments;
   final List<DocWarning> _warnings = [];
+  Set<String> _targetedAnchors = const <String>{};
 
   /// Parses `word/document.xml` and its dependencies into a [Document].
   ///
@@ -126,6 +127,7 @@ class DocxParser {
     }
 
     final mainCtx = _ParseContext(partPath: package.mainDocumentPartPath);
+    _targetedAnchors = _collectTargetedAnchors(body);
 
     // 1. Parse Headers
     final headerBlocks = <Block>[];
@@ -235,6 +237,24 @@ class DocxParser {
             loc: loc,
           ),
         ];
+
+      case 'bookmarkStart':
+        final name = _attrLocal(el, 'name');
+        if (name != null &&
+            _isNavigableBookmark(name) &&
+            _targetedAnchors.contains(name)) {
+          return [
+            _AnchorToken(
+              name: name,
+              '<a id="${_escapeHtmlAttr(name)}"></a>',
+              loc: loc,
+            ),
+          ];
+        }
+        return const [];
+
+      case 'bookmarkEnd':
+        return const [];
 
       case 'sectPr':
         return const [];
@@ -422,7 +442,14 @@ class DocxParser {
     required _ParseContext ctx,
     required String loc,
   }) {
-    return _parseInlineChildren(p, ctx: ctx, loc: loc);
+    final pPr = _firstChildByLocal(p, 'pPr');
+    final styleId = _attrLocal(_firstChildByLocal(pPr, 'pStyle'), 'val');
+    return _parseInlineChildren(
+      p,
+      ctx: ctx,
+      loc: loc,
+      inheritedRunProps: styles.resolveRunPropertiesForStyle(styleId),
+    );
   }
 
   /// Parses child elements into a list of [Inline] nodes.
@@ -435,6 +462,7 @@ class DocxParser {
     XmlElement container, {
     required _ParseContext ctx,
     required String loc,
+    StyleRunProperties? inheritedRunProps,
   }) {
     final out = <Inline>[];
     final activeCommentIds = <String>{};
@@ -453,6 +481,7 @@ class DocxParser {
           field,
           activeCommentIds,
           processChildren,
+          inheritedRunProps,
         );
       }
     }
@@ -474,6 +503,7 @@ class DocxParser {
     _FieldState field,
     Set<String> activeCommentIds,
     void Function(XmlElement, String) recurse,
+    StyleRunProperties? inheritedRunProps,
   ) {
     void push(Inline i) {
       // NOTE: Removed double hook application here.
@@ -489,6 +519,7 @@ class DocxParser {
           loc: cLoc,
           field: field,
           commentIds: activeCommentIds,
+          inheritedRunProps: inheritedRunProps,
         );
         if (field.isActive && field.inResult) {
           field.displayInlines.addAll(runs);
@@ -522,13 +553,23 @@ class DocxParser {
 
       case 'hyperlink':
         if (field.isActive) _finalizeField(out, field, cLoc);
-        final linkInlines = _parseHyperlink(child, ctx: ctx, loc: cLoc);
+        final linkInlines = _parseHyperlink(
+          child,
+          ctx: ctx,
+          loc: cLoc,
+          inheritedRunProps: inheritedRunProps,
+        );
         linkInlines.forEach(push);
         break;
 
       case 'fldSimple':
         if (field.isActive) _finalizeField(out, field, cLoc);
-        final simpleInlines = _parseFldSimple(child, ctx: ctx, loc: cLoc);
+        final simpleInlines = _parseFldSimple(
+          child,
+          ctx: ctx,
+          loc: cLoc,
+          inheritedRunProps: inheritedRunProps,
+        );
         simpleInlines.forEach(push);
         break;
 
@@ -646,6 +687,7 @@ class DocxParser {
     required String loc,
     required _FieldState field,
     required Set<String> commentIds,
+    required StyleRunProperties? inheritedRunProps,
   }) {
     final out = <Inline>[];
 
@@ -719,13 +761,19 @@ class DocxParser {
     }
 
     final rPr = _firstChildByLocal(r, 'rPr');
+    final runProps = _effectiveRunProperties(
+      rPr,
+      inheritedRunProps: inheritedRunProps,
+    );
 
     for (final child in r.children.whereType<XmlElement>()) {
       switch (child.name.local) {
         case 't':
           final text = child.innerText;
           if (text.isEmpty) break;
-          out.add(_applyRunFormatting(TextInline(text), rPr: rPr, loc: loc));
+          out.add(
+            _applyRunFormatting(TextInline(text), rPr: rPr, props: runProps),
+          );
           break;
         case 'tab':
         case 'ptab':
@@ -746,7 +794,9 @@ class DocxParser {
     if (out.isEmpty) {
       final txt = r.findAllElements('w:t').map((e) => e.innerText).join();
       if (txt.isNotEmpty) {
-        out.add(_applyRunFormatting(TextInline(txt), rPr: rPr, loc: loc));
+        out.add(
+          _applyRunFormatting(TextInline(txt), rPr: rPr, props: runProps),
+        );
       }
     }
 
@@ -756,9 +806,9 @@ class DocxParser {
   Inline _applyRunFormatting(
     Inline base, {
     required XmlElement? rPr,
-    required String loc,
+    required StyleRunProperties? props,
   }) {
-    if (rPr == null) return base;
+    if (props == null && rPr == null) return base;
 
     Inline node = base;
 
@@ -766,7 +816,7 @@ class DocxParser {
     // the innermost wrapper so emphasis and sub/superscript compose around it
     // instead of being dropped (e.g. a superscripted `2` in a Verbatim run
     // must render as `<sup>`2`</sup>`, not a bare `2`).
-    final isCode = _isCodeRun(rPr);
+    final isCode = _isCodeRun(rPr, props: props);
     if (isCode) {
       if (node case TextInline(:final text)) {
         node = CodeInline(text);
@@ -775,12 +825,11 @@ class DocxParser {
       }
     }
 
-    final bold = _isAnyOnOff(rPr, const ['b', 'bCs']);
-    final italic = _isAnyOnOff(rPr, const ['i', 'iCs']);
-    final strike = _isAnyOnOff(rPr, const ['strike', 'dstrike']);
-    final underline = _isOnOff(rPr, 'u');
-
-    final vertAlign = _attrLocal(_firstChildByLocal(rPr, 'vertAlign'), 'val');
+    final bold = props?.bold == true;
+    final italic = props?.italic == true;
+    final strike = props?.strike == true;
+    final underline = props?.underline == true;
+    final vertAlign = props?.vertAlign;
 
     if (underline) node = UnderlineInline([node]);
     if (strike) node = StrikeInline([node]);
@@ -798,14 +847,12 @@ class DocxParser {
     // wrapped in highlight/color, since w:shd and w:highlight share the same
     // background/color channel.
     if (!isCode) {
-      final color = _attrLocal(_firstChildByLocal(rPr, 'color'), 'val');
-      if (color != null && color.isNotEmpty && color.toLowerCase() != 'auto') {
+      final color = props?.color;
+      if (color != null && color.isNotEmpty) {
         node = ColorInline([node], color: color);
       }
-      final highlight = _attrLocal(_firstChildByLocal(rPr, 'highlight'), 'val');
-      if (highlight != null &&
-          highlight.isNotEmpty &&
-          highlight.toLowerCase() != 'none') {
+      final highlight = props?.highlight;
+      if (highlight != null && highlight.isNotEmpty) {
         node = HighlightInline([node], color: highlight);
       }
     }
@@ -813,9 +860,101 @@ class DocxParser {
     return node;
   }
 
-  bool _isOnOff(XmlElement rPr, String childLocalName) {
-    final el = _firstChildByLocal(rPr, childLocalName);
-    if (el == null) return false;
+  StyleRunProperties? _effectiveRunProperties(
+    XmlElement? rPr, {
+    required StyleRunProperties? inheritedRunProps,
+  }) {
+    var effective = inheritedRunProps;
+    if (rPr == null) return effective;
+
+    final rStyle = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
+    final styleProps = styles.resolveRunPropertiesForStyle(rStyle);
+    if (styleProps != null) {
+      effective = effective == null ? styleProps : effective.merge(styleProps);
+    }
+
+    final directProps = _parseDirectRunProperties(rPr);
+    if (directProps != null) {
+      effective = effective == null
+          ? directProps
+          : effective.merge(directProps);
+    }
+
+    return effective;
+  }
+
+  StyleRunProperties? _parseDirectRunProperties(XmlElement rPr) {
+    final rFonts = _firstChildByLocal(rPr, 'rFonts');
+    final ascii = _attrLocal(rFonts, 'ascii');
+    final hAnsi = _attrLocal(rFonts, 'hAnsi');
+    final cs = _attrLocal(rFonts, 'cs');
+
+    final hasShading = _firstChildByLocal(rPr, 'shd') != null;
+    final bold = _parseAnyOnOff(rPr, const ['b', 'bCs']);
+    final italic = _parseAnyOnOff(rPr, const ['i', 'iCs']);
+    final strike = _parseAnyOnOff(rPr, const ['strike', 'dstrike']);
+    final underline = _parseOnOff(_firstChildByLocal(rPr, 'u'));
+
+    final vertAlignEl = _firstChildByLocal(rPr, 'vertAlign');
+    final vertAlign = _attrLocal(vertAlignEl, 'val');
+
+    final colorEl = _firstChildByLocal(rPr, 'color');
+    final rawColor = _attrLocal(colorEl, 'val');
+    final color = rawColor == null || rawColor.toLowerCase() == 'auto'
+        ? null
+        : rawColor;
+
+    final highlightEl = _firstChildByLocal(rPr, 'highlight');
+    final rawHighlight = _attrLocal(highlightEl, 'val');
+    final highlight =
+        rawHighlight == null || rawHighlight.toLowerCase() == 'none'
+        ? null
+        : rawHighlight;
+
+    if (ascii == null &&
+        hAnsi == null &&
+        cs == null &&
+        !hasShading &&
+        bold == null &&
+        italic == null &&
+        strike == null &&
+        underline == null &&
+        vertAlignEl == null &&
+        colorEl == null &&
+        highlightEl == null) {
+      return null;
+    }
+
+    return StyleRunProperties(
+      asciiFont: ascii,
+      hAnsiFont: hAnsi,
+      csFont: cs,
+      hasShading: hasShading,
+      bold: bold,
+      italic: italic,
+      strike: strike,
+      underline: underline,
+      vertAlign: vertAlign,
+      vertAlignIsSet: vertAlignEl != null,
+      color: color,
+      colorIsSet: colorEl != null,
+      highlight: highlight,
+      highlightIsSet: highlightEl != null,
+    );
+  }
+
+  bool? _parseAnyOnOff(XmlElement rPr, Iterable<String> childLocalNames) {
+    var sawExplicitOff = false;
+    for (final name in childLocalNames) {
+      final parsed = _parseOnOff(_firstChildByLocal(rPr, name));
+      if (parsed == true) return true;
+      if (parsed == false) sawExplicitOff = true;
+    }
+    return sawExplicitOff ? false : null;
+  }
+
+  bool? _parseOnOff(XmlElement? el) {
+    if (el == null) return null;
     final v = _attrLocal(el, 'val');
     if (v == null) return true;
     final normalized = v.trim().toLowerCase();
@@ -825,22 +964,13 @@ class DocxParser {
         normalized != 'none';
   }
 
-  bool _isAnyOnOff(XmlElement rPr, Iterable<String> childLocalNames) {
-    return childLocalNames.any((name) => _isOnOff(rPr, name));
-  }
-
-  bool _isCodeRun(XmlElement rPr) {
-    final fonts = _firstChildByLocal(rPr, 'rFonts');
-    final ascii = _attrLocal(fonts, 'ascii');
-    final hAnsi = _attrLocal(fonts, 'hAnsi');
-    final cs = _attrLocal(fonts, 'cs');
-    if (_fontLooksMonospace(ascii) ||
-        _fontLooksMonospace(hAnsi) ||
-        _fontLooksMonospace(cs)) {
+  bool _isCodeRun(XmlElement? rPr, {required StyleRunProperties? props}) {
+    if (_fontLooksMonospace(props?.asciiFont) ||
+        _fontLooksMonospace(props?.hAnsiFont) ||
+        _fontLooksMonospace(props?.csFont)) {
       return true;
     }
-    if (config.treatShadedRunsAsCode &&
-        _firstChildByLocal(rPr, 'shd') != null) {
+    if (config.treatShadedRunsAsCode && (props?.hasShading ?? false)) {
       return true;
     }
     // A character style (w:rStyle) can carry the monospace font instead of an
@@ -882,12 +1012,18 @@ class DocxParser {
     XmlElement hyperlink, {
     required _ParseContext ctx,
     required String loc,
+    required StyleRunProperties? inheritedRunProps,
   }) {
     final rid = _attrLocal(hyperlink, 'id');
     final anchor = _attrLocal(hyperlink, 'anchor');
 
     // Recursively parse children (could contain runs with formatting)
-    final children = _parseInlineChildren(hyperlink, ctx: ctx, loc: loc);
+    final children = _parseInlineChildren(
+      hyperlink,
+      ctx: ctx,
+      loc: loc,
+      inheritedRunProps: inheritedRunProps,
+    );
 
     if (children.isEmpty) return const [];
 
@@ -910,6 +1046,7 @@ class DocxParser {
     XmlElement fldSimple, {
     required _ParseContext ctx,
     required String loc,
+    required StyleRunProperties? inheritedRunProps,
   }) {
     final instr = _attrLocal(fldSimple, 'instr');
     if (instr == null || instr.isEmpty) return const [];
@@ -919,7 +1056,12 @@ class DocxParser {
     final ref = _extractRefBookmark(instr);
 
     // Recursively parse children
-    final children = _parseInlineChildren(fldSimple, ctx: ctx, loc: loc);
+    final children = _parseInlineChildren(
+      fldSimple,
+      ctx: ctx,
+      loc: loc,
+      inheritedRunProps: inheritedRunProps,
+    );
 
     if (children.isEmpty) {
       if (url != null) {
@@ -966,23 +1108,20 @@ class DocxParser {
       // PART-AWARE RESOLUTION
       final src = _resolveMediaTarget(embed, ctx: ctx);
       if (src != null) {
-        final alt =
-            drawing.descendants
-                .whereType<XmlElement>()
-                .firstWhereOrNull((e) => e.name.local == 'cNvPr')
-                ?.attributes
-                .firstWhereOrNull((a) => a.name.local == 'descr')
-                ?.value ??
-            'Image';
+        final docPr = drawing.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'docPr');
+        final cNvPr = drawing.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'cNvPr');
+        final alt = _firstNonEmptyAttr([
+          _attrLocal(docPr, 'descr'),
+          _attrLocal(cNvPr, 'descr'),
+        ], fallback: 'Image');
 
         // `wp:docPr/@title` is Word's "Alt Text" title field. ImageInline renders
         // it as a Markdown link title: `![alt](src "title")`.
-        final rawTitle = drawing.descendants
-            .whereType<XmlElement>()
-            .firstWhereOrNull((e) => e.name.local == 'docPr')
-            ?.attributes
-            .firstWhereOrNull((a) => a.name.local == 'title')
-            ?.value;
+        final rawTitle = _attrLocal(docPr, 'title');
         final title = (rawTitle != null && rawTitle.isNotEmpty)
             ? rawTitle
             : null;
@@ -1783,6 +1922,18 @@ class DocxParser {
     return a?.value;
   }
 
+  String _firstNonEmptyAttr(
+    Iterable<String?> values, {
+    required String fallback,
+  }) {
+    for (final value in values) {
+      if (value == null) continue;
+      final trimmed = value.trim();
+      if (trimmed.isNotEmpty) return trimmed;
+    }
+    return fallback;
+  }
+
   String? _decodeHexChar(String? hex) {
     if (hex == null) return null;
     final cleaned = hex.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
@@ -1909,6 +2060,37 @@ class DocxParser {
         .replaceAll('<', '&lt;')
         .replaceAll('>', '&gt;');
   }
+
+  String _escapeHtmlAttr(String s) {
+    return _escapeHtml(s).replaceAll('"', '&quot;');
+  }
+
+  Set<String> _collectTargetedAnchors(XmlElement body) {
+    final anchors = <String>{};
+    for (final el in body.descendants.whereType<XmlElement>()) {
+      if (el.name.local == 'hyperlink') {
+        final anchor = _attrLocal(el, 'anchor');
+        if (anchor != null && anchor.isNotEmpty) anchors.add(anchor);
+      }
+      if (el.name.local == 'fldSimple') {
+        _collectAnchorsFromInstr(_attrLocal(el, 'instr'), anchors);
+      }
+      if (el.name.local == 'instrText') {
+        _collectAnchorsFromInstr(el.innerText, anchors);
+      }
+    }
+    return anchors;
+  }
+
+  void _collectAnchorsFromInstr(String? instr, Set<String> anchors) {
+    if (instr == null || instr.isEmpty) return;
+    final hyperlinkAnchor = _extractHyperlinkAnchor(instr);
+    if (hyperlinkAnchor != null && hyperlinkAnchor.isNotEmpty) {
+      anchors.add(hyperlinkAnchor);
+    }
+    final refAnchor = _extractRefBookmark(instr);
+    if (refAnchor != null && refAnchor.isNotEmpty) anchors.add(refAnchor);
+  }
 }
 
 // ============================================================================
@@ -1960,6 +2142,15 @@ class _CodeLineToken extends _Token {
   final int? continuationIndentTwips;
   final String? language;
 }
+
+class _AnchorToken extends _Token {
+  _AnchorToken(this.html, {required this.name, required this.loc});
+  final String name;
+  final String html;
+  final String loc;
+}
+
+typedef _PendingAnchor = ({String name, String html});
 
 // ============================================================================
 // Builder nodes (mutable) -> converted to immutable IR Blocks at the end.
@@ -2049,6 +2240,7 @@ class _TokenBuilder {
   final DocxToMarkdownConfig config;
   final List<_BNode> _top = [];
   final List<_BListEntry> _listStack = [];
+  final List<_PendingAnchor> _pendingAnchors = [];
   _CodeAccumulator? _code;
 
   List<Block> get outputBlocks =>
@@ -2063,6 +2255,7 @@ class _TokenBuilder {
   void finish() {
     _flushCode();
     _closeAllLists();
+    _flushPendingAnchorsTo(_top);
   }
 
   void _consume(_Token t) {
@@ -2074,14 +2267,19 @@ class _TokenBuilder {
       case _CodeLineToken():
         _handleCodeLine(t);
         return;
+      case _AnchorToken():
+        _flushCode();
+        _pendingAnchors.add((name: t.name, html: t.html));
+        return;
       case _BlockToken():
         if (_listStack.isNotEmpty && t.canContinueList) {
           _flushCode();
-          _currentListItemBlocks().add(_BLeaf(t.block));
+          _addBlockToCurrentListItem(t.block);
           return;
         }
         _flushCode();
         _closeAllLists();
+        _flushPendingAnchorsTo(_top, beforeBlock: t.block);
         _top.add(_BLeaf(t.block));
         return;
     }
@@ -2133,15 +2331,15 @@ class _TokenBuilder {
       _listStack.removeLast();
     }
 
-    // Restart only when the numbering instance (numId) changes. A change of
-    // numId is how Word represents a genuine list restart; consecutive items
-    // sharing one numId stay a single list. (Interruptions by non-list blocks
-    // are handled separately by _closeAllLists, which clears the stack.) A
-    // start value alone must NOT split a list - that was the cause of every
-    // numbered list shattering into single-item lists.
+    // Ordered lists restart when the numbering instance (numId) changes.
+    // Unordered lists do not carry visible numbering state, and Word often
+    // swaps bullet numIds only to vary glyph definitions. Keep adjacent bullets
+    // at the same level together unless a real non-list block interrupts them.
     if (_listStack.length == level + 1) {
       final top = _listStack.last;
-      if (top.numId != t.numId) _listStack.removeLast();
+      final sameListKind = top.list.ordered == t.ordered;
+      final numIdRequiresRestart = t.ordered && top.numId != t.numId;
+      if (!sameListKind || numIdRequiresRestart) _listStack.removeLast();
     }
 
     // Open missing list levels
@@ -2169,8 +2367,59 @@ class _TokenBuilder {
       _listStack.add(_BListEntry(list: listBlock, numId: t.numId));
     }
 
-    final item = _BListItem(blocks: t.itemBlocks.map((b) => _BLeaf(b)));
+    final itemBlocks = _consumePendingAnchorsIntoListItem(t.itemBlocks);
+    final item = _BListItem(blocks: itemBlocks.map((b) => _BLeaf(b)));
     _listStack.last.list.items.add(item);
+  }
+
+  void _addBlockToCurrentListItem(Block block) {
+    final itemBlocks = _currentListItemBlocks();
+    if (_pendingAnchors.isEmpty) {
+      itemBlocks.add(_BLeaf(block));
+      return;
+    }
+    final blocks = _consumePendingAnchorsIntoListItem([block]);
+    itemBlocks.addAll(blocks.map((b) => _BLeaf(b)));
+  }
+
+  List<Block> _consumePendingAnchorsIntoListItem(List<Block> blocks) {
+    if (_pendingAnchors.isEmpty) return blocks;
+    final anchorInlines = _pendingAnchors
+        .map<Inline>((anchor) => HtmlInline(anchor.html))
+        .toList(growable: false);
+    final anchorHtml = _pendingAnchors.map((anchor) => anchor.html).join();
+    _pendingAnchors.clear();
+
+    if (blocks.isEmpty) return [HtmlBlock(anchorHtml)];
+    final first = blocks.first;
+    if (first is ParagraphBlock) {
+      return [
+        ParagraphBlock([...anchorInlines, ...first.inlines], meta: first.meta),
+        ...blocks.skip(1),
+      ];
+    }
+    return [HtmlBlock(anchorHtml), ...blocks];
+  }
+
+  void _flushPendingAnchorsTo(List<_BNode> container, {Block? beforeBlock}) {
+    if (_pendingAnchors.isEmpty) return;
+    final anchors = beforeBlock is HeadingBlock
+        ? _pendingAnchors
+              .where(
+                (anchor) =>
+                    !_bookmarkSatisfiedByHeading(anchor.name, beforeBlock),
+              )
+              .toList(growable: false)
+        : List<_PendingAnchor>.of(_pendingAnchors);
+    if (anchors.isNotEmpty) {
+      container.add(_BLeaf(HtmlBlock(anchors.map((a) => a.html).join())));
+    }
+    _pendingAnchors.clear();
+  }
+
+  bool _bookmarkSatisfiedByHeading(String bookmarkName, HeadingBlock heading) {
+    return _githubHeadingSlug(_plainTextForHeadingSlug(heading.inlines)) ==
+        bookmarkName;
   }
 
   void _closeAllLists() {
@@ -2184,6 +2433,73 @@ class _TokenBuilder {
     }
     return list.items.last.blocks;
   }
+}
+
+String _plainTextForHeadingSlug(List<Inline> inlines) {
+  final buffer = StringBuffer();
+  for (final inline in inlines) {
+    switch (inline) {
+      case TextInline():
+        buffer.write(inline.text);
+      case CodeInline():
+        buffer.write(inline.text);
+      case LineBreakInline():
+      case SoftBreakInline():
+        buffer.write(' ');
+      case FootnoteRefInline():
+        break;
+      case ImageInline():
+        buffer.write(inline.alt);
+      case LinkInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case StrongInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case EmphInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case StrikeInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case UnderlineInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case SupInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case SubInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case HighlightInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case ColorInline():
+        buffer.write(_plainTextForHeadingSlug(inline.children));
+      case HtmlInline():
+        break;
+    }
+  }
+  return buffer.toString();
+}
+
+String _githubHeadingSlug(String text) {
+  final buffer = StringBuffer();
+  var lastWasSpace = false;
+  for (final rune in text.trim().toLowerCase().runes) {
+    final char = String.fromCharCode(rune);
+    if (char.trim().isEmpty) {
+      if (!lastWasSpace && buffer.isNotEmpty) {
+        buffer.write('-');
+        lastWasSpace = true;
+      }
+      continue;
+    }
+    if (char == '-' || char == '_' || _isSlugLetterOrDigit(rune)) {
+      buffer.write(char);
+      lastWasSpace = false;
+    }
+  }
+  final slug = buffer.toString();
+  return slug.endsWith('-') ? slug.substring(0, slug.length - 1) : slug;
+}
+
+bool _isSlugLetterOrDigit(int rune) {
+  return (rune >= 0x30 && rune <= 0x39) ||
+      (rune >= 0x61 && rune <= 0x7A) ||
+      rune > 0x7F;
 }
 
 enum _VMergeType { none, restart, continueCell }

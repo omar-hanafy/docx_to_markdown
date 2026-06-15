@@ -64,6 +64,16 @@ class StyleRunProperties {
     this.hAnsiFont,
     this.csFont,
     this.hasShading = false,
+    this.bold,
+    this.italic,
+    this.strike,
+    this.underline,
+    this.vertAlign,
+    this.vertAlignIsSet = false,
+    this.color,
+    this.colorIsSet = false,
+    this.highlight,
+    this.highlightIsSet = false,
   });
 
   /// The ASCII font family name (used for Latin characters).
@@ -79,6 +89,36 @@ class StyleRunProperties {
   ///
   /// Shading combined with a monospace font is a strong indicator of code.
   final bool hasShading;
+
+  /// Whether bold is enabled, disabled, or unspecified by this style.
+  final bool? bold;
+
+  /// Whether italic is enabled, disabled, or unspecified by this style.
+  final bool? italic;
+
+  /// Whether strike-through is enabled, disabled, or unspecified by this style.
+  final bool? strike;
+
+  /// Whether underline is enabled, disabled, or unspecified by this style.
+  final bool? underline;
+
+  /// The vertical alignment value, such as `superscript` or `subscript`.
+  final String? vertAlign;
+
+  /// Whether [vertAlign] was specified, even if it resets to baseline.
+  final bool vertAlignIsSet;
+
+  /// The run text color value, when specified and not automatic.
+  final String? color;
+
+  /// Whether [color] was specified, even when it resolves to automatic.
+  final bool colorIsSet;
+
+  /// The highlight color value, when specified and not `none`.
+  final String? highlight;
+
+  /// Whether [highlight] was specified, even when it resolves to none.
+  final bool highlightIsSet;
 
   /// Returns `true` if any of the fonts appear to be monospace.
   ///
@@ -113,6 +153,26 @@ class StyleRunProperties {
 
     // Exact matches or substring hints.
     return monospaceHints.any((hint) => f == hint || f.contains(hint));
+  }
+
+  /// Returns a copy with [other]'s specified values overriding this instance.
+  StyleRunProperties merge(StyleRunProperties other) {
+    return StyleRunProperties(
+      asciiFont: other.asciiFont ?? asciiFont,
+      hAnsiFont: other.hAnsiFont ?? hAnsiFont,
+      csFont: other.csFont ?? csFont,
+      hasShading: hasShading || other.hasShading,
+      bold: other.bold ?? bold,
+      italic: other.italic ?? italic,
+      strike: other.strike ?? strike,
+      underline: other.underline ?? underline,
+      vertAlign: other.vertAlignIsSet ? other.vertAlign : vertAlign,
+      vertAlignIsSet: vertAlignIsSet || other.vertAlignIsSet,
+      color: other.colorIsSet ? other.color : color,
+      colorIsSet: colorIsSet || other.colorIsSet,
+      highlight: other.highlightIsSet ? other.highlight : highlight,
+      highlightIsSet: highlightIsSet || other.highlightIsSet,
+    );
   }
 }
 
@@ -479,6 +539,35 @@ class StyleRegistry {
     return false;
   }
 
+  /// Resolves effective run properties for a paragraph or character style.
+  ///
+  /// Walks the basedOn chain from the root style to the leaf style so child
+  /// styles override inherited values. Returns null when the style chain has no
+  /// run properties.
+  StyleRunProperties? resolveRunPropertiesForStyle(String? styleId) {
+    if (styleId == null || styleId.isEmpty) return null;
+
+    final visited = <String>{};
+    final chain = <StyleDefinition>[];
+    StyleDefinition? current = _stylesById[styleId];
+    int depth = 0;
+
+    while (current != null && depth++ < _maxStyleChainDepth) {
+      if (!visited.add(current.id)) break;
+      chain.add(current);
+      if (current.basedOn == null) break;
+      current = _stylesById[current.basedOn!];
+    }
+
+    StyleRunProperties? resolved;
+    for (final def in chain.reversed) {
+      final rp = def.runProps;
+      if (rp == null) continue;
+      resolved = resolved == null ? rp : resolved.merge(rp);
+    }
+    return resolved;
+  }
+
   /// Resolves effective numbering properties for a paragraph style.
   ///
   /// Walks the basedOn chain to find inherited numId/ilvl.
@@ -608,8 +697,37 @@ class StyleRegistry {
     final cs = _attrLocal(rFonts, 'cs');
 
     final hasShading = _childLocal(rPr, 'shd') != null;
+    final bold = _parseAnyOnOff(rPr, const ['b', 'bCs']);
+    final italic = _parseAnyOnOff(rPr, const ['i', 'iCs']);
+    final strike = _parseAnyOnOff(rPr, const ['strike', 'dstrike']);
+    final underline = _parseOnOff(_childLocal(rPr, 'u'));
+    final vertAlignEl = _childLocal(rPr, 'vertAlign');
+    final vertAlign = _attrLocal(vertAlignEl, 'val');
 
-    if (ascii == null && hAnsi == null && cs == null && !hasShading) {
+    final colorEl = _childLocal(rPr, 'color');
+    final rawColor = _attrLocal(colorEl, 'val');
+    final color = rawColor == null || rawColor.toLowerCase() == 'auto'
+        ? null
+        : rawColor;
+
+    final highlightEl = _childLocal(rPr, 'highlight');
+    final rawHighlight = _attrLocal(highlightEl, 'val');
+    final highlight =
+        rawHighlight == null || rawHighlight.toLowerCase() == 'none'
+        ? null
+        : rawHighlight;
+
+    if (ascii == null &&
+        hAnsi == null &&
+        cs == null &&
+        !hasShading &&
+        bold == null &&
+        italic == null &&
+        strike == null &&
+        underline == null &&
+        vertAlignEl == null &&
+        colorEl == null &&
+        highlightEl == null) {
       return null;
     }
 
@@ -618,7 +736,38 @@ class StyleRegistry {
       hAnsiFont: hAnsi,
       csFont: cs,
       hasShading: hasShading,
+      bold: bold,
+      italic: italic,
+      strike: strike,
+      underline: underline,
+      vertAlign: vertAlign,
+      vertAlignIsSet: vertAlignEl != null,
+      color: color,
+      colorIsSet: colorEl != null,
+      highlight: highlight,
+      highlightIsSet: highlightEl != null,
     );
+  }
+
+  bool? _parseAnyOnOff(XmlElement rPr, Iterable<String> childLocalNames) {
+    var sawExplicitOff = false;
+    for (final name in childLocalNames) {
+      final parsed = _parseOnOff(_childLocal(rPr, name));
+      if (parsed == true) return true;
+      if (parsed == false) sawExplicitOff = true;
+    }
+    return sawExplicitOff ? false : null;
+  }
+
+  bool? _parseOnOff(XmlElement? el) {
+    if (el == null) return null;
+    final v = _attrLocal(el, 'val');
+    if (v == null) return true;
+    final normalized = v.trim().toLowerCase();
+    return normalized != 'false' &&
+        normalized != '0' &&
+        normalized != 'off' &&
+        normalized != 'none';
   }
 
   bool _hasExtraMonospaceHint(StyleRunProperties rp) {

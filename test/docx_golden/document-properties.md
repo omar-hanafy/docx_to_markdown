@@ -4,7 +4,7 @@
 
 A. M.
 
-Abstract
+**Abstract**
 
 Quite a long description spanning several lines
 

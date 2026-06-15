@@ -696,12 +696,35 @@ class MarkdownRenderer {
       } else if (b is ListBlock) {
         // Minimal HTML list fallback inside table cell
         parts.add(_renderListAsHtml(b));
+      } else if (b is TableBlock) {
+        parts.add(_renderTableAsHtmlString(b));
       } else {
         parts.add(_escapeHtml(_renderBlockAsPlainText(b)));
       }
     }
 
     return parts.join('<br/>');
+  }
+
+  String _renderTableAsHtmlString(TableBlock table) {
+    final rows = table.grid.rows;
+    if (rows.isEmpty) return '';
+
+    final sb = StringBuffer()..write('<table>');
+    for (var r = 0; r < rows.length; r++) {
+      final row = rows[r];
+      sb.write('<tr>');
+      for (final cell in row.cells) {
+        final tag = r == 0 ? 'th' : 'td';
+        final attrs = StringBuffer();
+        if (cell.colSpan != 1) attrs.write(' colspan="${cell.colSpan}"');
+        if (cell.rowSpan != 1) attrs.write(' rowspan="${cell.rowSpan}"');
+        sb.write('<$tag${attrs.toString()}>${_renderCellHtml(cell)}</$tag>');
+      }
+      sb.write('</tr>');
+    }
+    sb.write('</table>');
+    return sb.toString();
   }
 
   String _renderListAsHtml(ListBlock list) {
@@ -719,6 +742,8 @@ class MarkdownRenderer {
           if (html.trim().isNotEmpty) blocksHtml.add(html);
         } else if (b is ListBlock) {
           blocksHtml.add(_renderListAsHtml(b));
+        } else if (b is TableBlock) {
+          blocksHtml.add(_renderTableAsHtmlString(b));
         } else if (b is CodeBlock) {
           blocksHtml.add('<pre><code>${_escapeHtml(b.text)}</code></pre>');
         } else {
@@ -868,6 +893,7 @@ class MarkdownRenderer {
     List<Inline> inlines, {
     required bool canBreak,
     required bool breakAsBr,
+    bool renderLinks = true,
   }) {
     final b = _InlineBuffer();
 
@@ -877,6 +903,7 @@ class MarkdownRenderer {
         b,
         canBreak: canBreak,
         breakAsBrWhenNoBreakAllowed: breakAsBr,
+        renderLinks: renderLinks,
       );
     }
 
@@ -890,6 +917,7 @@ class MarkdownRenderer {
     _InlineBuffer out, {
     required bool canBreak,
     bool breakAsBrWhenNoBreakAllowed = true,
+    bool renderLinks = true,
   }) {
     if (node is TextInline) {
       out.write(_escapeMarkdownText(node.text));
@@ -932,10 +960,24 @@ class MarkdownRenderer {
     }
 
     if (node is LinkInline) {
+      if (!renderLinks) {
+        for (final child in _normalizeInlines(node.children)) {
+          _emitInline(
+            child,
+            out,
+            canBreak: canBreak,
+            breakAsBrWhenNoBreakAllowed: breakAsBrWhenNoBreakAllowed,
+            renderLinks: false,
+          );
+        }
+        return;
+      }
+
       final text = _renderInlineGroupAsText(
         node.children,
         canBreak: false,
         breakAsBr: true,
+        renderLinks: false,
       );
       final url = _rewriteLinkTarget(node.url, 'inline/link');
       final destination = _linkDestinationWithTitle(url, node.title);
@@ -1371,7 +1413,20 @@ class MarkdownRenderer {
       return lines.join('\n');
     }
     if (block is TableBlock) {
-      return '[table]';
+      return block.grid.rows
+          .map(
+            (row) => row.cells
+                .map(
+                  (cell) => cell.blocks
+                      .map(_renderBlockAsPlainText)
+                      .where((text) => text.trim().isNotEmpty)
+                      .join(' '),
+                )
+                .where((text) => text.trim().isNotEmpty)
+                .join(' | '),
+          )
+          .where((text) => text.trim().isNotEmpty)
+          .join('\n');
     }
     if (block is HorizontalRuleBlock) return '---';
     if (block is PageBreakBlock) return '';
