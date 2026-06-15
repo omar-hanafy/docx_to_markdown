@@ -81,6 +81,24 @@ void main() {
       expect(markdown.trim(), '# Title');
     });
 
+    test('renders Block Text paragraph style as quote', () async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            styleId: 'BlockText',
+            innerXml: wR(text: 'Quoted'),
+          ),
+        ),
+        stylesXml: stylesXml(
+          styleId: 'BlockText',
+          styleName: 'Block Text',
+          outlineLevel: null,
+        ),
+      );
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '> Quoted');
+    });
+
     test('coalesces code style paragraphs into fenced code block', () async {
       final body = [
         wP(
@@ -190,6 +208,53 @@ void main() {
         ),
       ).convert();
       expect(markdown.trim(), '1. A\n1. B');
+    });
+
+    test('renders checkbox bullets as GFM task list items', () async {
+      const numbering =
+          '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="☐"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="2">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="☒"/></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="3">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val=" "/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+  <w:num w:numId="3"><w:abstractNumId w:val="3"/></w:num>
+</w:numbering>''';
+      final body = [
+        wP(
+          numId: '1',
+          innerXml: wR(text: 'Todo'),
+        ),
+        wP(
+          numId: '2',
+          innerXml: wR(text: 'Done'),
+        ),
+        wP(
+          numId: '3',
+          innerXml: wR(text: 'Details'),
+        ),
+      ].join();
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: numbering,
+      );
+
+      final doc = await parseDocument(bytes);
+      final lists = doc.blocks.whereType<ListBlock>().toList();
+      expect(lists, hasLength(1));
+      expect(lists.single.items[0].checked, isFalse);
+      expect(lists.single.items[1].checked, isTrue);
+      expect(lists.single.items[1].blocks, hasLength(2));
+
+      final markdown = await DocxConverter(bytes).convert();
+      expect(markdown.trim(), '- [ ] Todo\n- [x] Done\n  Details');
     });
 
     test('continues list item when paragraph is indented', () async {
@@ -427,6 +492,73 @@ void main() {
       final markdown = await DocxConverter(bytes).convert();
       expect(markdown.trim(), '![AltText](image1.png "My Title")');
     });
+
+    test('uses drawing extent for obsidian image size hints', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml: wDrawingImage(
+            embedId: 'rId2',
+            descr: 'AltText',
+            extentCx: 1828800,
+            extentCy: 914400,
+          ),
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+      final markdown = await DocxConverter(
+        bytes,
+        config: DocxToMarkdownConfig(imageSizeMode: ImageSizeMode.obsidian),
+      ).convert();
+
+      expect(markdown.trim(), '![AltText](image1.png =192x96)');
+    });
+
+    test(
+      'uses constrained drawing extent for pandoc image size hints',
+      () async {
+        final body = wP(
+          innerXml: wR(
+            innerXml: wDrawingImage(
+              embedId: 'rId2',
+              descr: 'AltText',
+              extentCx: 1828800,
+              extentCy: 914400,
+            ),
+          ),
+        );
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          documentRels: const [
+            DocxRel(
+              id: 'rId2',
+              type: DocxRelTypes.image,
+              target: 'media/image1.png',
+            ),
+          ],
+        );
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(
+            imageSizeMode: ImageSizeMode.pandoc,
+            maxImageWidth: 96,
+          ),
+        ).convert();
+
+        expect(
+          markdown.trim(),
+          '![AltText](image1.png){ width=96px height=48px }',
+        );
+      },
+    );
 
     test('falls back to generic image alt when docPr descr is empty', () async {
       final body = wP(
@@ -1122,6 +1254,7 @@ void main() {
     test('table alignments reflect jc in first row', () async {
       final table = '''<w:tbl>
   <w:tr>
+    <w:trPr><w:tblHeader w:val="on"/></w:trPr>
     <w:tc>
       <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
     </w:tc>

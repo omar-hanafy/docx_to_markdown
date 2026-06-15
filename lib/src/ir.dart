@@ -666,7 +666,7 @@ final class ListBlock extends Block {
 @immutable
 final class ListItem extends DocNode {
   /// Creates a list item with the given content blocks.
-  ListItem({required Iterable<Block> blocks, super.meta})
+  ListItem({required Iterable<Block> blocks, this.checked, super.meta})
     : blocks = _freezeList(blocks);
 
   /// The content of this list item.
@@ -675,11 +675,17 @@ final class ListItem extends DocNode {
   /// including nested [ListBlock]s.
   final List<Block> blocks;
 
-  @override
-  List<Object?> get props => <Object?>[blocks];
+  /// Task-list checkbox state when the DOCX bullet marker is a checkbox.
+  ///
+  /// `true` renders as checked, `false` as unchecked, and `null` means this is
+  /// an ordinary list item.
+  final bool? checked;
 
   @override
-  String toString() => 'ListItem(blocks: ${blocks.length})';
+  List<Object?> get props => <Object?>[blocks, checked];
+
+  @override
+  String toString() => 'ListItem(blocks: ${blocks.length}, checked: $checked)';
 }
 
 /// A table with rows, cells, and optional column alignments.
@@ -826,6 +832,8 @@ final class ImageBlock extends Block {
     required this.src,
     required this.alt,
     this.title,
+    this.widthPx,
+    this.heightPx,
     super.meta,
   });
 
@@ -840,11 +848,18 @@ final class ImageBlock extends Block {
   /// Optional title (appears on hover in some renderers).
   final String? title;
 
-  @override
-  List<Object?> get props => <Object?>[src, alt, title];
+  /// Image width in pixels, when the DOCX stores a drawing extent.
+  final int? widthPx;
+
+  /// Image height in pixels, when the DOCX stores a drawing extent.
+  final int? heightPx;
 
   @override
-  String toString() => 'ImageBlock(src: $src, alt: $alt)';
+  List<Object?> get props => <Object?>[src, alt, title, widthPx, heightPx];
+
+  @override
+  String toString() =>
+      'ImageBlock(src: $src, alt: $alt, size: ${widthPx}x$heightPx)';
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1127,8 @@ final class ImageInline extends Inline {
     required this.src,
     required this.alt,
     this.title,
+    this.widthPx,
+    this.heightPx,
     super.meta,
   });
 
@@ -1124,11 +1141,18 @@ final class ImageInline extends Inline {
   /// Optional title (appears on hover in some renderers).
   final String? title;
 
-  @override
-  List<Object?> get props => <Object?>[src, alt, title];
+  /// Image width in pixels, when the DOCX stores a drawing extent.
+  final int? widthPx;
+
+  /// Image height in pixels, when the DOCX stores a drawing extent.
+  final int? heightPx;
 
   @override
-  String toString() => 'ImageInline(src: $src, alt: $alt)';
+  List<Object?> get props => <Object?>[src, alt, title, widthPx, heightPx];
+
+  @override
+  String toString() =>
+      'ImageInline(src: $src, alt: $alt, size: ${widthPx}x$heightPx)';
 }
 
 /// A reference to a footnote definition.

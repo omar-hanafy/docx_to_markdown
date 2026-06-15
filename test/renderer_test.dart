@@ -412,6 +412,50 @@ World
       expect(markdown.trim(), '| H1 | H2 |\n|:---|---:|\n| A | B |');
     });
 
+    test('auto mode renders headerless tables as HTML', () {
+      final table = TableBlock(
+        grid: TableGrid(
+          rows: [
+            TableRow(
+              cells: [
+                TableCell(
+                  blocks: [
+                    ParagraphBlock([const TextInline('A')]),
+                  ],
+                ),
+                TableCell(
+                  blocks: [
+                    ParagraphBlock([const TextInline('B')]),
+                  ],
+                ),
+              ],
+            ),
+            TableRow(
+              cells: [
+                TableCell(
+                  blocks: [
+                    ParagraphBlock([const TextInline('C')]),
+                  ],
+                ),
+                TableCell(
+                  blocks: [
+                    ParagraphBlock([const TextInline('D')]),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      final doc = Document(blocks: [table]);
+      final markdown = MarkdownRenderer(
+        config: DocxToMarkdownConfig.defaults,
+      ).render(doc);
+      expect(markdown.trim().startsWith('<table>'), isTrue);
+      expect(markdown, contains('<td>A</td>'));
+      expect(markdown, contains('<td>C</td>'));
+    });
+
     test('renders list and code inside HTML table cells', () {
       final table = TableBlock(
         grid: TableGrid(

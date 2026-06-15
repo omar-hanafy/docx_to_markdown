@@ -1,2 +1,7 @@
-| One | Row | Table |
-|---|---|---|
+<table>
+  <tr>
+    <td>One</td>
+    <td>Row</td>
+    <td>Table</td>
+  </tr>
+</table>

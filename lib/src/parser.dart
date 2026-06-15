@@ -372,6 +372,8 @@ class DocxParser {
         ilvl: effectiveIlvl,
       );
       final ordered = levelInfo?.ordered ?? false;
+      final checked = levelInfo?.taskChecked;
+      final markerIsBlank = levelInfo?.markerIsBlank ?? false;
       // Resolved starting number: an instance lvlOverride/startOverride wins,
       // otherwise the abstract level's w:start. This only sets where the list
       // begins - it must not trigger a per-item restart (see _addListItem).
@@ -388,6 +390,8 @@ class DocxParser {
           numId: effectiveNumId,
           start: start,
           numberFormat: numberFormat,
+          checked: checked,
+          markerIsBlank: markerIsBlank,
           loc: loc,
           itemBlocks: [ParagraphBlock(inlines)],
         ),
@@ -1125,8 +1129,17 @@ class DocxParser {
         final title = (rawTitle != null && rawTitle.isNotEmpty)
             ? rawTitle
             : null;
+        final dimensions = _readDrawingExtentPx(drawing);
 
-        return [ImageInline(src: src, alt: alt, title: title)];
+        return [
+          ImageInline(
+            src: src,
+            alt: alt,
+            title: title,
+            widthPx: dimensions.widthPx,
+            heightPx: dimensions.heightPx,
+          ),
+        ];
       }
     }
 
@@ -1188,6 +1201,25 @@ class DocxParser {
     final title = (rawTitle != null && rawTitle.isNotEmpty) ? rawTitle : null;
     final alt = 'Image';
     return ImageInline(src: src, alt: alt, title: title);
+  }
+
+  ({int? widthPx, int? heightPx}) _readDrawingExtentPx(XmlElement drawing) {
+    final extent = drawing.descendants.whereType<XmlElement>().firstWhereOrNull(
+      (e) =>
+          e.name.local == 'extent' &&
+          _attrLocal(e, 'cx') != null &&
+          _attrLocal(e, 'cy') != null,
+    );
+    return (
+      widthPx: _emuToPx(_attrLocal(extent, 'cx')),
+      heightPx: _emuToPx(_attrLocal(extent, 'cy')),
+    );
+  }
+
+  int? _emuToPx(String? value) {
+    final emu = int.tryParse(value ?? '');
+    if (emu == null || emu <= 0) return null;
+    return (emu * 96 / 914400).round();
   }
 
   // ===========================================================================
@@ -1799,6 +1831,7 @@ class DocxParser {
                   it.blocks,
                   baseLoc: '$loc:listItem[$idx]',
                 ),
+                checked: it.checked,
               ),
             )
             .toList(),
@@ -2113,6 +2146,8 @@ class _ListItemToken extends _Token {
     required this.numId,
     this.start,
     this.numberFormat = ListNumberFormat.decimal,
+    this.checked,
+    this.markerIsBlank = false,
     required this.itemBlocks,
     required this.loc,
   });
@@ -2126,6 +2161,8 @@ class _ListItemToken extends _Token {
   /// it never forces a per-item restart.
   final int? start;
   final ListNumberFormat numberFormat;
+  final bool? checked;
+  final bool markerIsBlank;
   final List<Block> itemBlocks;
   final String loc;
 }
@@ -2196,15 +2233,17 @@ final class _BList implements _BNode {
 }
 
 final class _BListItem {
-  _BListItem({Iterable<_BNode> blocks = const []}) {
+  _BListItem({Iterable<_BNode> blocks = const [], this.checked}) {
     this.blocks.addAll(blocks);
   }
 
+  final bool? checked;
   final List<_BNode> blocks = [];
 
   ListItem toListItem() {
     return ListItem(
       blocks: blocks.map((b) => b.toBlock()).toList(growable: false),
+      checked: checked,
     );
   }
 }
@@ -2331,6 +2370,14 @@ class _TokenBuilder {
       _listStack.removeLast();
     }
 
+    if (t.markerIsBlank &&
+        t.checked == null &&
+        _listStack.length == level + 1 &&
+        _currentListItemIsTask()) {
+      _addBlocksToCurrentListItem(t.itemBlocks);
+      return;
+    }
+
     // Ordered lists restart when the numbering instance (numId) changes.
     // Unordered lists do not carry visible numbering state, and Word often
     // swaps bullet numIds only to vary glyph definitions. Keep adjacent bullets
@@ -2368,18 +2415,32 @@ class _TokenBuilder {
     }
 
     final itemBlocks = _consumePendingAnchorsIntoListItem(t.itemBlocks);
-    final item = _BListItem(blocks: itemBlocks.map((b) => _BLeaf(b)));
+    final item = _BListItem(
+      blocks: itemBlocks.map((b) => _BLeaf(b)),
+      checked: t.checked,
+    );
     _listStack.last.list.items.add(item);
   }
 
+  bool _currentListItemIsTask() {
+    if (_listStack.isEmpty) return false;
+    final items = _listStack.last.list.items;
+    if (items.isEmpty) return false;
+    return items.last.checked != null;
+  }
+
   void _addBlockToCurrentListItem(Block block) {
+    _addBlocksToCurrentListItem([block]);
+  }
+
+  void _addBlocksToCurrentListItem(List<Block> blocks) {
     final itemBlocks = _currentListItemBlocks();
     if (_pendingAnchors.isEmpty) {
-      itemBlocks.add(_BLeaf(block));
+      itemBlocks.addAll(blocks.map((b) => _BLeaf(b)));
       return;
     }
-    final blocks = _consumePendingAnchorsIntoListItem([block]);
-    itemBlocks.addAll(blocks.map((b) => _BLeaf(b)));
+    final resolvedBlocks = _consumePendingAnchorsIntoListItem(blocks);
+    itemBlocks.addAll(resolvedBlocks.map((b) => _BLeaf(b)));
   }
 
   List<Block> _consumePendingAnchorsIntoListItem(List<Block> blocks) {
@@ -2563,7 +2624,12 @@ class _NumberingModel {
                 .firstWhereOrNull((a) => a.name.local == 'val')
                 ?.value ??
             'bullet';
-
+        final lvlText = lvl.descendants
+            .whereType<XmlElement>()
+            .firstWhereOrNull((e) => e.name.local == 'lvlText')
+            ?.attributes
+            .firstWhereOrNull((a) => a.name.local == 'val')
+            ?.value;
         // The abstract level's starting number (w:lvl/w:start). This only sets
         // where the list begins; it must NOT be treated as a restart signal
         // (genuine restarts arrive as instance lvlOverride/startOverride below).
@@ -2575,7 +2641,11 @@ class _NumberingModel {
             ?.value;
         final startInt = int.tryParse(start ?? '');
 
-        levelMap[ilvl] = _LevelInfo(numFmt: numFmt, start: startInt);
+        levelMap[ilvl] = _LevelInfo(
+          numFmt: numFmt,
+          lvlText: lvlText,
+          start: startInt,
+        );
       }
       m._abstractLevels[absId] = levelMap;
     }
@@ -2631,6 +2701,7 @@ class _NumberingModel {
     if (override == null) return info;
     return _LevelInfo(
       numFmt: info.numFmt,
+      lvlText: info.lvlText,
       start: info.start,
       startOverride: override,
     );
@@ -2638,8 +2709,14 @@ class _NumberingModel {
 }
 
 class _LevelInfo {
-  _LevelInfo({required this.numFmt, this.start, this.startOverride});
+  _LevelInfo({
+    required this.numFmt,
+    this.lvlText,
+    this.start,
+    this.startOverride,
+  });
   final String numFmt;
+  final String? lvlText;
 
   /// The abstract level's starting number (`w:lvl/w:start`). Present on most
   /// ordered lists; it sets where the list begins and is NOT a restart signal.
@@ -2649,6 +2726,26 @@ class _LevelInfo {
   /// Distinct from [start] so that an ordinary `w:start` is never mistaken for
   /// a mid-list restart.
   final int? startOverride;
+
+  bool get markerIsBlank {
+    final text = lvlText;
+    return text != null && text.trim().isEmpty;
+  }
+
+  bool? get taskChecked {
+    switch (lvlText?.trim()) {
+      case '☐':
+      case '□':
+        return false;
+      case '☒':
+      case '☑':
+      case '✓':
+      case '✔':
+        return true;
+      default:
+        return null;
+    }
+  }
 
   bool get ordered {
     final f = numFmt.toLowerCase();

@@ -6,10 +6,24 @@
 | Ryan Braun | Baseball | Moderate | Steroids |
 | Russell Wilson | Football | High | Tacky uniform |
 
-| Sinple | Table |
-|---|---|
-| Without | Header |
+<table>
+  <tr>
+    <td>Sinple</td>
+    <td>Table</td>
+  </tr>
+  <tr>
+    <td>Without</td>
+    <td>Header</td>
+  </tr>
+</table>
 
-| Simple<br>Multiparagraph | Table<br>Full |
-|---|---|
-| Of<br>Paragraphs | In each<br>Cell. |
+<table>
+  <tr>
+    <td>Simple<br/>Multiparagraph</td>
+    <td>Table<br/>Full</td>
+  </tr>
+  <tr>
+    <td>Of<br/>Paragraphs</td>
+    <td>In each<br/>Cell.</td>
+  </tr>
+</table>

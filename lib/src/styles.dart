@@ -642,6 +642,7 @@ class StyleRegistry {
     const quoteHints = <String>[
       'quote',
       'blockquote',
+      'block text',
       'intense quote',
       'citation',
       'epigraph',

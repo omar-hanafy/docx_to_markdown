@@ -4,7 +4,7 @@ The contents of this div should have a custom style, but [this link should not](
 
 ## This header should not have the div’s custom style
 
-This blockquote should not.
+> This blockquote should not.
 
 ```
 # This code block should not.
@@ -18,7 +18,7 @@ This should have MyInnerStyle.
 
 This should have MyOuterStyle, but the following elision should have its own style. ...
 
-This blockquote should include **bold text with an elision: ...**
+> This blockquote should include **bold text with an elision: ...**
 
 ---
 

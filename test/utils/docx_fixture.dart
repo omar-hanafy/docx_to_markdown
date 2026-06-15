@@ -267,11 +267,21 @@ String wFldSimple({required String instr, required String innerXml}) {
   return '<w:fldSimple w:instr="$escaped">$innerXml</w:fldSimple>';
 }
 
-String wDrawingImage({required String embedId, String? descr, String? title}) {
+String wDrawingImage({
+  required String embedId,
+  String? descr,
+  String? title,
+  int? extentCx,
+  int? extentCy,
+}) {
   final d = descr ?? 'Image';
   final titleAttr = title == null ? '' : ' title="$title"';
+  final extent = extentCx == null || extentCy == null
+      ? ''
+      : '<wp:extent cx="$extentCx" cy="$extentCy"/>';
   return '''<w:drawing>
   <wp:inline>
+    $extent
     <wp:docPr id="1" name="Picture" descr="$d"$titleAttr/>
     <a:graphic>
       <a:graphicData>

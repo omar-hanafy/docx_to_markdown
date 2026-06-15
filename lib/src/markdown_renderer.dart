@@ -185,6 +185,8 @@ class MarkdownRenderer {
           src: block.src,
           alt: block.alt,
           title: block.title,
+          widthPx: block.widthPx,
+          heightPx: block.heightPx,
           contextPath: 'block/image',
         ),
         ctx,
@@ -346,15 +348,18 @@ class MarkdownRenderer {
     required int listDepth,
     required bool loose,
   }) {
-    final marker = ordered
+    final baseMarker = ordered
         ? _orderedMarker(numberFormat, index)
         : config.bulletMarkers[listDepth % config.bulletMarkers.length];
+    final marker = item.checked == null
+        ? baseMarker
+        : '$baseMarker [${item.checked! ? 'x' : ' '}]';
     // Pandoc requires two spaces after a single capital-letter marker (A. / I.)
     // so it is not mistaken for prose; one space is fine everywhere else.
     final gap = (ordered && _needsWideGap(marker)) ? '  ' : ' ';
     final markerPrefix = '${ctx.prefix}$marker$gap';
     final hangingPrefix = ctx.prefix + ' ' * (marker.length + gap.length);
-    final listIndent = _listIndentForMarker(marker, gap.length);
+    final listIndent = _listIndentForMarker(baseMarker, gap.length);
 
     if (item.blocks.isEmpty) {
       w.writelnRaw(markerPrefix.trimRight());
@@ -526,6 +531,10 @@ class MarkdownRenderer {
     final cols = rows.first.cells.length;
     if (cols == 0) return false;
 
+    if (!rows.any((row) => row.isHeader || row.cells.any((c) => c.isHeader))) {
+      return false;
+    }
+
     // Rectangular
     if (rows.any((r) => r.cells.length != cols)) return false;
 
@@ -664,7 +673,7 @@ class MarkdownRenderer {
       w.writeln('  <tr>', ctx);
 
       for (final cell in row.cells) {
-        final tag = (r == 0) ? 'th' : 'td';
+        final tag = row.isHeader || cell.isHeader ? 'th' : 'td';
 
         final attrs = StringBuffer();
         if (cell.colSpan != 1) attrs.write(' colspan="${cell.colSpan}"');
@@ -711,11 +720,10 @@ class MarkdownRenderer {
     if (rows.isEmpty) return '';
 
     final sb = StringBuffer()..write('<table>');
-    for (var r = 0; r < rows.length; r++) {
-      final row = rows[r];
+    for (final row in rows) {
       sb.write('<tr>');
       for (final cell in row.cells) {
-        final tag = r == 0 ? 'th' : 'td';
+        final tag = row.isHeader || cell.isHeader ? 'th' : 'td';
         final attrs = StringBuffer();
         if (cell.colSpan != 1) attrs.write(' colspan="${cell.colSpan}"');
         if (cell.rowSpan != 1) attrs.write(' rowspan="${cell.rowSpan}"');
@@ -733,6 +741,8 @@ class MarkdownRenderer {
 
     for (final item in list.items) {
       sb.write('<li>');
+      final checkboxHtml = _taskCheckboxHtml(item.checked);
+      if (checkboxHtml != null) sb.write(checkboxHtml);
 
       // Flatten item blocks to HTML
       final blocksHtml = <String>[];
@@ -757,6 +767,13 @@ class MarkdownRenderer {
 
     sb.write('</$tag>');
     return sb.toString();
+  }
+
+  String? _taskCheckboxHtml(bool? checked) {
+    if (checked == null) return null;
+    return checked
+        ? '<input type="checkbox" checked disabled/> '
+        : '<input type="checkbox" disabled/> ';
   }
 
   // ---------------------------------------------------------------------------
@@ -993,6 +1010,8 @@ class MarkdownRenderer {
           src: node.src,
           alt: node.alt,
           title: node.title,
+          widthPx: node.widthPx,
+          heightPx: node.heightPx,
           contextPath: 'inline/image',
         ),
       );
@@ -1173,8 +1192,13 @@ class MarkdownRenderer {
       final alt = _escapeHtmlAttr(node.alt);
       final title = _htmlTitleAttr(node.title);
 
+      final size = _effectiveImageSize(
+        widthPx: node.widthPx,
+        heightPx: node.heightPx,
+      );
       if (config.maxImageWidth > 0) {
-        return '<img src="$src" alt="$alt"$title width="${config.maxImageWidth}"/>';
+        final width = size.widthPx ?? config.maxImageWidth;
+        return '<img src="$src" alt="$alt"$title width="$width"/>';
       }
       return '<img src="$src" alt="$alt"$title/>';
     }
@@ -1186,19 +1210,21 @@ class MarkdownRenderer {
     required String src,
     required String alt,
     required String? title,
+    required int? widthPx,
+    required int? heightPx,
     required String contextPath,
   }) {
     final escapedAlt = _escapeLinkText(alt);
     final rewrittenSrc = _rewriteImageTarget(src, contextPath);
     final destination = _linkDestinationWithTitle(rewrittenSrc, title);
+    final size = _effectiveImageSize(widthPx: widthPx, heightPx: heightPx);
 
-    if (config.maxImageWidth > 0 &&
-        config.imageSizeMode != ImageSizeMode.none) {
+    if (size.hasAny && config.imageSizeMode != ImageSizeMode.none) {
       switch (config.imageSizeMode) {
         case ImageSizeMode.obsidian:
-          return '![$escapedAlt]($destination =${config.maxImageWidth}x)';
+          return '![$escapedAlt]($destination ${_obsidianImageSize(size)})';
         case ImageSizeMode.pandoc:
-          return '![$escapedAlt]($destination){ width=${config.maxImageWidth}px }';
+          return '![$escapedAlt]($destination){ ${_pandocImageSize(size)} }';
         case ImageSizeMode.none:
           break;
       }
@@ -1206,12 +1232,50 @@ class MarkdownRenderer {
 
     if (config.maxImageWidth > 0) {
       final titleAttr = _htmlTitleAttr(title);
+      final width = size.widthPx ?? config.maxImageWidth;
       return '<img src="${_escapeHtmlAttr(rewrittenSrc)}" '
           'alt="${_escapeHtmlAttr(alt)}"$titleAttr '
-          'width="${config.maxImageWidth}"/>';
+          'width="$width"/>';
     }
 
     return '![$escapedAlt]($destination)';
+  }
+
+  _ImageRenderSize _effectiveImageSize({
+    required int? widthPx,
+    required int? heightPx,
+  }) {
+    final maxWidth = config.maxImageWidth;
+    if (maxWidth <= 0) {
+      return _ImageRenderSize(widthPx: widthPx, heightPx: heightPx);
+    }
+    if (widthPx == null || widthPx <= 0) {
+      return _ImageRenderSize(widthPx: maxWidth, heightPx: heightPx);
+    }
+    if (widthPx <= maxWidth) {
+      return _ImageRenderSize(widthPx: widthPx, heightPx: heightPx);
+    }
+    final constrainedHeight = heightPx == null || heightPx <= 0
+        ? null
+        : (heightPx * maxWidth / widthPx).round();
+    return _ImageRenderSize(widthPx: maxWidth, heightPx: constrainedHeight);
+  }
+
+  String _obsidianImageSize(_ImageRenderSize size) {
+    final width = size.widthPx;
+    final height = size.heightPx;
+    if (width != null && height != null) return '=${width}x$height';
+    if (width != null) return '=${width}x';
+    return '=x$height';
+  }
+
+  String _pandocImageSize(_ImageRenderSize size) {
+    final attrs = <String>[];
+    final width = size.widthPx;
+    final height = size.heightPx;
+    if (width != null) attrs.add('width=${width}px');
+    if (height != null) attrs.add('height=${height}px');
+    return attrs.join(' ');
   }
 
   // ---------------------------------------------------------------------------
@@ -1504,6 +1568,15 @@ class _RenderContext {
     // Trim right so "> " becomes ">" and we don't emit trailing spaces.
     return prefix.trimRight();
   }
+}
+
+class _ImageRenderSize {
+  const _ImageRenderSize({this.widthPx, this.heightPx});
+
+  final int? widthPx;
+  final int? heightPx;
+
+  bool get hasAny => widthPx != null || heightPx != null;
 }
 
 class _LineWriter {

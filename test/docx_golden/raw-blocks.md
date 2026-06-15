@@ -1,4 +1,8 @@
 Cell compartments
 
-| Ribosome | Lysosome |
-|---|---|
+<table>
+  <tr>
+    <td>Ribosome</td>
+    <td>Lysosome</td>
+  </tr>
+</table>

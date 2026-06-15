@@ -874,9 +874,9 @@ class DocxToMarkdownConfig {
 
   /// Maximum image width hint in pixels. Defaults to `0` (disabled).
   ///
-  /// When non-zero and [imageSizeMode] is not [ImageSizeMode.none], images
-  /// wider than this value include a width hint. The actual constraining
-  /// depends on the target renderer.
+  /// When non-zero, image output is constrained to this width. If
+  /// [imageSizeMode] is not [ImageSizeMode.none], the size is encoded with that
+  /// Markdown extension; otherwise an HTML `<img>` tag is emitted.
   final int maxImageWidth;
 
   /// How to encode image dimensions. Defaults to [ImageSizeMode.none].
