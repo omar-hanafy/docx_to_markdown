@@ -795,77 +795,6 @@ class DocxParser {
   }) {
     final out = <Inline>[];
 
-    final fldChar = _firstChildByLocal(r, 'fldChar');
-    if (fldChar != null) {
-      final type = _attrLocal(fldChar, 'fldCharType');
-      if (type == 'begin') {
-        field.begin(loc: loc);
-        return const [];
-      }
-      if (type == 'separate') {
-        field.separate(loc: loc);
-        return const [];
-      }
-      if (type == 'end') {
-        field.end(loc: loc);
-        return const [];
-      }
-    }
-
-    final instrText = _firstChildByLocal(r, 'instrText');
-    if (instrText != null && field.isActive && !field.inResult) {
-      final t = instrText.innerText;
-      if (t.isNotEmpty) field.appendInstr(t);
-      return const [];
-    }
-
-    if (config.includeFootnotes) {
-      final fnRef = _firstChildByLocal(r, 'footnoteReference');
-      if (fnRef != null) {
-        final id = _attrLocal(fnRef, 'id');
-        if (id != null) {
-          return [FootnoteRefInline(id)];
-        }
-      }
-    }
-
-    if (config.includeEndnotes) {
-      final enRef = _firstChildByLocal(r, 'endnoteReference');
-      if (enRef != null) {
-        final id = _attrLocal(enRef, 'id');
-        if (id != null) {
-          return [FootnoteRefInline('endnote:$id')];
-        }
-      }
-    }
-
-    if (config.includeComments) {
-      final commentRef = _firstChildByLocal(r, 'commentReference');
-      if (commentRef != null) {
-        final id = _attrLocal(commentRef, 'id');
-        if (id != null) {
-          final comment = _commentInlineForId(id, emittedCommentIds);
-          if (comment != null) out.add(comment);
-        }
-      }
-    }
-
-    final drawing = _firstChildByLocal(r, 'drawing');
-    if (drawing != null) {
-      final extracted = _parseDrawingAsInline(
-        drawing,
-        ctx: ctx,
-        loc: '$loc:drawing',
-      );
-      if (extracted != null) return extracted;
-    }
-
-    final pict = _firstChildByLocal(r, 'pict');
-    if (pict != null) {
-      final img = _parseVmlImage(pict, ctx: ctx, loc: '$loc:pict');
-      if (img != null) return [img];
-    }
-
     final rPr = _firstChildByLocal(r, 'rPr');
     final runStyleId = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
     final runMeta = _runMeta(ctx: ctx, loc: loc, styleId: runStyleId);
@@ -874,17 +803,64 @@ class DocxParser {
       inheritedRunProps: inheritedRunProps,
     );
 
-    final sym = _firstChildByLocal(r, 'sym');
-    if (sym != null) {
-      final charHex = _attrLocal(sym, 'char');
-      final decoded = _decodeHexChar(charHex);
-      if (decoded != null) {
-        out.add(TextInline(decoded, meta: runMeta));
-      }
-    }
-
-    for (final child in r.children.whereType<XmlElement>()) {
+    final children = r.children.whereType<XmlElement>().toList();
+    for (var i = 0; i < children.length; i++) {
+      final child = children[i];
+      final childLoc = '$loc:${child.name.local}[$i]';
       switch (child.name.local) {
+        case 'fldChar':
+          final type = _attrLocal(child, 'fldCharType');
+          if (type == 'begin') {
+            field.begin(loc: childLoc);
+          } else if (type == 'separate') {
+            field.separate(loc: childLoc);
+          } else if (type == 'end') {
+            field.end(loc: childLoc);
+          }
+          break;
+        case 'instrText':
+          if (field.isActive && !field.inResult) {
+            final text = child.innerText;
+            if (text.isNotEmpty) field.appendInstr(text);
+          }
+          break;
+        case 'footnoteReference':
+          if (config.includeFootnotes) {
+            final id = _attrLocal(child, 'id');
+            if (id != null) out.add(FootnoteRefInline(id));
+          }
+          break;
+        case 'endnoteReference':
+          if (config.includeEndnotes) {
+            final id = _attrLocal(child, 'id');
+            if (id != null) out.add(FootnoteRefInline('endnote:$id'));
+          }
+          break;
+        case 'commentReference':
+          if (config.includeComments) {
+            final id = _attrLocal(child, 'id');
+            if (id != null) {
+              final comment = _commentInlineForId(id, emittedCommentIds);
+              if (comment != null) out.add(comment);
+            }
+          }
+          break;
+        case 'drawing':
+          final extracted = _parseDrawingAsInline(
+            child,
+            ctx: ctx,
+            loc: childLoc,
+          );
+          if (extracted != null) out.addAll(extracted);
+          break;
+        case 'pict':
+          final img = _parseVmlImage(child, ctx: ctx, loc: childLoc);
+          if (img != null) out.add(img);
+          break;
+        case 'sym':
+          final decoded = _decodeHexChar(_attrLocal(child, 'char'));
+          if (decoded != null) out.add(TextInline(decoded, meta: runMeta));
+          break;
         case 't':
           final text = child.innerText;
           if (text.isEmpty) break;
@@ -913,7 +889,11 @@ class DocxParser {
     }
 
     if (out.isEmpty) {
-      final txt = r.findAllElements('w:t').map((e) => e.innerText).join();
+      final txt = r.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 't')
+          .map((e) => e.innerText)
+          .join();
       if (txt.isNotEmpty) {
         out.add(
           _applyRunFormatting(
@@ -1031,7 +1011,8 @@ class DocxParser {
     final hAnsi = _attrLocal(rFonts, 'hAnsi');
     final cs = _attrLocal(rFonts, 'cs');
 
-    final hasShading = _firstChildByLocal(rPr, 'shd') != null;
+    final shadingEl = _firstChildByLocal(rPr, 'shd');
+    final hasShading = _parseShading(shadingEl);
     final bold = _parseAnyOnOff(rPr, const ['b', 'bCs']);
     final italic = _parseAnyOnOff(rPr, const ['i', 'iCs']);
     final strike = _parseAnyOnOff(rPr, const ['strike', 'dstrike']);
@@ -1056,7 +1037,7 @@ class DocxParser {
     if (ascii == null &&
         hAnsi == null &&
         cs == null &&
-        !hasShading &&
+        shadingEl == null &&
         bold == null &&
         italic == null &&
         strike == null &&
@@ -1072,6 +1053,7 @@ class DocxParser {
       hAnsiFont: hAnsi,
       csFont: cs,
       hasShading: hasShading,
+      shadingIsSet: shadingEl != null,
       bold: bold,
       italic: italic,
       strike: strike,
@@ -1104,6 +1086,12 @@ class DocxParser {
         normalized != '0' &&
         normalized != 'off' &&
         normalized != 'none';
+  }
+
+  bool _parseShading(XmlElement? el) {
+    if (el == null) return false;
+    final v = _attrLocal(el, 'val')?.trim().toLowerCase();
+    return v != 'nil';
   }
 
   bool _isCodeRun(XmlElement? rPr, {required StyleRunProperties? props}) {

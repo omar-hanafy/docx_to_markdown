@@ -77,6 +77,7 @@ class StyleRunProperties {
     this.hAnsiFont,
     this.csFont,
     this.hasShading = false,
+    this.shadingIsSet = false,
     this.bold,
     this.italic,
     this.strike,
@@ -102,6 +103,9 @@ class StyleRunProperties {
   ///
   /// Shading combined with a monospace font is a strong indicator of code.
   final bool hasShading;
+
+  /// Whether shading was specified, even when it resolves to no shading.
+  final bool shadingIsSet;
 
   /// Whether bold is enabled, disabled, or unspecified by this style.
   final bool? bold;
@@ -174,7 +178,8 @@ class StyleRunProperties {
       asciiFont: other.asciiFont ?? asciiFont,
       hAnsiFont: other.hAnsiFont ?? hAnsiFont,
       csFont: other.csFont ?? csFont,
-      hasShading: hasShading || other.hasShading,
+      hasShading: other.shadingIsSet ? other.hasShading : hasShading,
+      shadingIsSet: shadingIsSet || other.shadingIsSet,
       bold: other.bold ?? bold,
       italic: other.italic ?? italic,
       strike: other.strike ?? strike,
@@ -766,7 +771,8 @@ class StyleRegistry {
     final hAnsi = _attrLocal(rFonts, 'hAnsi');
     final cs = _attrLocal(rFonts, 'cs');
 
-    final hasShading = _childLocal(rPr, 'shd') != null;
+    final shadingEl = _childLocal(rPr, 'shd');
+    final hasShading = _parseShading(shadingEl);
     final bold = _parseAnyOnOff(rPr, const ['b', 'bCs']);
     final italic = _parseAnyOnOff(rPr, const ['i', 'iCs']);
     final strike = _parseAnyOnOff(rPr, const ['strike', 'dstrike']);
@@ -790,7 +796,7 @@ class StyleRegistry {
     if (ascii == null &&
         hAnsi == null &&
         cs == null &&
-        !hasShading &&
+        shadingEl == null &&
         bold == null &&
         italic == null &&
         strike == null &&
@@ -806,6 +812,7 @@ class StyleRegistry {
       hAnsiFont: hAnsi,
       csFont: cs,
       hasShading: hasShading,
+      shadingIsSet: shadingEl != null,
       bold: bold,
       italic: italic,
       strike: strike,
@@ -838,6 +845,12 @@ class StyleRegistry {
         normalized != '0' &&
         normalized != 'off' &&
         normalized != 'none';
+  }
+
+  bool _parseShading(XmlElement? el) {
+    if (el == null) return false;
+    final v = _attrLocal(el, 'val')?.trim().toLowerCase();
+    return v != 'nil';
   }
 
   bool _hasExtraMonospaceHint(StyleRunProperties rp) {

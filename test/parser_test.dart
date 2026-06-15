@@ -687,6 +687,31 @@ void main() {
       );
     });
 
+    test('preserves text around an image in the same run', () async {
+      final body = wP(
+        innerXml: wR(
+          innerXml:
+              '${wT("Before ")}'
+              '${wDrawingImage(embedId: "rId2", descr: "Inline image")}'
+              '${wT(" after")}',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        documentRels: const [
+          DocxRel(
+            id: 'rId2',
+            type: DocxRelTypes.image,
+            target: 'media/image1.png',
+          ),
+        ],
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(markdown.trim(), 'Before ![Inline image](image1.png) after');
+    });
+
     test('parses w:highlight and renders as mark when enabled', () async {
       final body = wP(
         innerXml: wR(text: 'x', rPrXml: '<w:highlight w:val="yellow"/>'),
@@ -1046,6 +1071,33 @@ void main() {
       expect(markdown.contains('Footnote text'), isTrue);
     });
 
+    test(
+      'preserves text around a footnote reference in the same run',
+      () async {
+        final body = wP(
+          innerXml:
+              '<w:r>${wT("Before")}<w:footnoteReference w:id="1"/>'
+              '${wT("After")}</w:r>',
+        );
+        final footnotes =
+            '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="1">
+    <w:p><w:r><w:t>Footnote text</w:t></w:r></w:p>
+  </w:footnote>
+</w:footnotes>''';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          footnotesXml: footnotes,
+        );
+
+        final markdown = await DocxConverter(bytes).convert();
+
+        expect(markdown, contains('Before[^1]After'));
+        expect(markdown, contains('[^1]: Footnote text'));
+      },
+    );
+
     test('renders endnotes when enabled', () async {
       final body = wP(
         innerXml:
@@ -1069,6 +1121,36 @@ void main() {
       expect(markdown.contains('endnote:2'), isTrue);
       expect(markdown.contains('Endnote text'), isTrue);
     });
+
+    test(
+      'preserves text around an endnote reference in the same run',
+      () async {
+        final body = wP(
+          innerXml:
+              '<w:r>${wT("Before")}<w:endnoteReference w:id="2"/>'
+              '${wT("After")}</w:r>',
+        );
+        final endnotes =
+            '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:id="2">
+    <w:p><w:r><w:t>Endnote text</w:t></w:r></w:p>
+  </w:endnote>
+</w:endnotes>''';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          endnotesXml: endnotes,
+        );
+
+        final markdown = await DocxConverter(
+          bytes,
+          config: DocxToMarkdownConfig(includeEndnotes: true),
+        ).convert();
+
+        expect(markdown, contains('Before[^endnote:2]After'));
+        expect(markdown, contains('[^endnote:2]: Endnote text'));
+      },
+    );
 
     test('emits comments when includeComments is true', () async {
       final body =
@@ -2274,6 +2356,29 @@ void main() {
       final markdown = await DocxConverter(bytes).convert();
 
       expect(markdown.trim(), '***Styled***');
+    });
+
+    test('direct nil shading overrides inherited shaded code', () async {
+      final styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Shaded">
+    <w:name w:val="Shaded"/>
+    <w:rPr><w:shd w:val="clear" w:fill="DDDDDD"/></w:rPr>
+  </w:style>
+</w:styles>''';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(
+          wP(
+            styleId: 'Shaded',
+            innerXml: wR(text: 'Plain', rPrXml: '<w:shd w:val="nil"/>'),
+          ),
+        ),
+        stylesXml: styles,
+      );
+
+      final markdown = await DocxConverter(bytes).convert();
+
+      expect(markdown.trim(), 'Plain');
     });
 
     test('character style w:rPr applies to the styled run', () async {
