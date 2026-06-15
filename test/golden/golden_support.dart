@@ -45,6 +45,9 @@ List<GoldenCase> discoverCases() {
       .listSync()
       .whereType<File>()
       .where((f) => f.path.toLowerCase().endsWith('.docx'))
+      // Skip Word lock files (`~$name.docx`), created while a document is open.
+      // They are not valid DOCX archives and must not become golden cases.
+      .where((f) => !p.basename(f.path).startsWith(r'~$'))
       .map((f) => GoldenCase(p.basenameWithoutExtension(f.path)))
       .toList()
     ..sort((a, b) => a.name.compareTo(b.name));
@@ -86,11 +89,20 @@ Future<GoldenResult> convertCase(GoldenCase c) async {
 
 /// Normalizes Markdown for stable comparison: CRLF -> LF, strip per-line
 /// trailing whitespace, and end with exactly one trailing newline.
+///
+/// Markdown hard line breaks (a content line ending in two-or-more spaces) are
+/// preserved as exactly two trailing spaces. Stripping them unconditionally
+/// would make goldens lossy - a hard break would look identical to a soft
+/// break - and blind the suite to hard-break regressions.
 String normalize(String s) {
-  final lines = s
-      .replaceAll('\r\n', '\n')
-      .split('\n')
-      .map((l) => l.replaceAll(RegExp(r'[ \t]+$'), ''));
+  final hardBreak = RegExp(r'\S {2,}$');
+  final trailing = RegExp(r'[ \t]+$');
+  final lines = s.replaceAll('\r\n', '\n').split('\n').map((l) {
+    if (hardBreak.hasMatch(l)) {
+      return '${l.replaceAll(trailing, '')}  ';
+    }
+    return l.replaceAll(trailing, '');
+  });
   return '${lines.join('\n').trimRight()}\n';
 }
 

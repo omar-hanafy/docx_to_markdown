@@ -372,6 +372,7 @@ class StyleRegistry {
     bool isQuote = false;
 
     int depth = 0;
+    var atLeaf = true;
 
     while (current != null && depth++ < _maxStyleChainDepth) {
       if (!visited.add(current.id)) {
@@ -411,6 +412,7 @@ class StyleRegistry {
         final derived = _inferHeadingLevelFromIdOrName(
           current.id,
           current.name,
+          allowTitleSubtitle: atLeaf,
         );
         if (derived != null) {
           isHeading = true;
@@ -421,6 +423,7 @@ class StyleRegistry {
       // Walk up basedOn chain
       if (current.basedOn == null) break;
       current = _stylesById[current.basedOn!];
+      atLeaf = false;
     }
 
     final result = StyleAnalysis(
@@ -432,6 +435,48 @@ class StyleRegistry {
 
     _analysisCache[styleId] = result;
     return result;
+  }
+
+  /// Whether a character style (referenced by `w:rStyle`) indicates inline code.
+  ///
+  /// Walks the `w:basedOn` chain and returns `true` when any style in the chain
+  /// is a registered code style, matches the code-name heuristics, or carries a
+  /// monospace font. Word/Pandoc emit inline code via a "Verbatim Char"
+  /// character style (Consolas) rather than an inline `w:rFonts`, so resolving
+  /// the style chain is required to detect it.
+  ///
+  /// Unlike a paragraph style, a monospace font alone is treated as a code
+  /// signal here: applying an explicit monospace character style to a span is a
+  /// deliberate "this is code" gesture.
+  bool isCodeCharacterStyle(String? styleId) {
+    if (styleId == null || styleId.isEmpty) return false;
+
+    final visited = <String>{};
+    StyleDefinition? current = _stylesById[styleId];
+    int depth = 0;
+
+    while (current != null && depth++ < _maxStyleChainDepth) {
+      if (!visited.add(current.id)) break;
+
+      final idNorm = current.id.trim().toLowerCase();
+      final nameNorm = _normName(current.name);
+      if (_codeStyleIdsNorm.contains(idNorm) ||
+          (nameNorm != null && _codeStyleNamesNorm.contains(nameNorm)) ||
+          _looksLikeCodeStyle(current)) {
+        return true;
+      }
+
+      final rp = current.runProps;
+      if (rp != null &&
+          (rp.isProbablyMonospace || _hasExtraMonospaceHint(rp))) {
+        return true;
+      }
+
+      if (current.basedOn == null) break;
+      current = _stylesById[current.basedOn!];
+    }
+
+    return false;
   }
 
   /// Resolves effective numbering properties for a paragraph style.
@@ -515,7 +560,11 @@ class StyleRegistry {
     return quoteHints.any((h) => name.contains(h) || id.contains(h));
   }
 
-  int? _inferHeadingLevelFromIdOrName(String styleId, String? styleName) {
+  int? _inferHeadingLevelFromIdOrName(
+    String styleId,
+    String? styleName, {
+    bool allowTitleSubtitle = true,
+  }) {
     // Example ids: Heading1, heading2, HEADING_3
     // Names: "Heading 1", "heading 2"
     final id = styleId.trim().toLowerCase();
@@ -535,9 +584,13 @@ class StyleRegistry {
       if (n != null && n > 0) return n;
     }
 
-    // Some templates use "Title" / "Subtitle" as heading-like
-    if (name == 'title' || id == 'title') return 1;
-    if (name == 'subtitle' || id == 'subtitle') return 2;
+    // "Title"/"Subtitle" map to heading-like levels, but only when this is the
+    // paragraph's own (leaf) style. A custom style merely basedOn "Title"
+    // (e.g. "Author") must not inherit heading-ness through this name heuristic.
+    if (allowTitleSubtitle) {
+      if (name == 'title' || id == 'title') return 1;
+      if (name == 'subtitle' || id == 'subtitle') return 2;
+    }
 
     return null;
   }

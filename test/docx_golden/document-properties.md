@@ -1,18 +1,10 @@
-#
+# Testing custom properties
 
-      Testing custom properties
+## This is a subtitle
 
-##
+A. M.
 
-      This is a subtitle
-
-#
-
-      A. M.
-
-
-
-      Abstract
+Abstract
 
 Quite a long description spanning several lines
 

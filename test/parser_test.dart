@@ -1425,4 +1425,156 @@ void main() {
       expect(doc.warnings.first.code, 'unsupported.block');
     });
   });
+
+  group('Property elements are never inline content', () {
+    // Some tools (and hand edits) pretty-print document.xml, leaving literal
+    // whitespace text nodes inside <w:pPr>. That whitespace must never leak
+    // into the paragraph's text, and pPr must not produce a warning.
+    test(
+      'whitespace-formatted w:pPr does not leak into heading text',
+      () async {
+        const body = '''
+<w:p>
+  <w:pPr>
+    <w:pStyle w:val="Heading1"/>
+  </w:pPr>
+  <w:r><w:t>Hello</w:t></w:r>
+</w:p>''';
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          stylesXml: stylesXml(
+            styleId: 'Heading1',
+            styleName: 'heading 1',
+            outlineLevel: 0,
+          ),
+        );
+        final doc = await parseDocument(bytes);
+        expect(doc.blocks, hasLength(1));
+        final heading = doc.blocks.single as HeadingBlock;
+        expect(heading.level, 1);
+        expect(heading.inlines.toPlainText(), 'Hello');
+        expect(
+          doc.warnings.where((w) => w.message.contains('pPr')),
+          isEmpty,
+          reason: 'w:pPr must be skipped, not treated as an unknown inline',
+        );
+      },
+    );
+
+    test(
+      'whitespace-formatted w:pPr does not leak into paragraph text',
+      () async {
+        const body = '''
+<w:p>
+  <w:pPr>
+    <w:jc w:val="center"/>
+  </w:pPr>
+  <w:r><w:t>Centered</w:t></w:r>
+</w:p>''';
+        final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
+        final doc = await parseDocument(bytes);
+        final para = doc.blocks.single as ParagraphBlock;
+        expect(para.inlines.toPlainText(), 'Centered');
+      },
+    );
+  });
+
+  group('Title/Subtitle heading heuristic is leaf-only', () {
+    const titleStyles =
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Title"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Author"><w:name w:val="Author"/><w:basedOn w:val="Title"/></w:style>
+</w:styles>''';
+
+    test(
+      'Title -> H1 and Subtitle -> H2, but Author (basedOn Title) stays a paragraph',
+      () async {
+        final body =
+            wP(text: 'The Title', styleId: 'Title') +
+            wP(text: 'The Subtitle', styleId: 'Subtitle') +
+            wP(text: 'A. Author', styleId: 'Author');
+        final bytes = buildDocxBytes(
+          documentXml: docXmlWithBody(body),
+          stylesXml: titleStyles,
+        );
+        final doc = await parseDocument(bytes);
+        expect(doc.blocks, hasLength(3));
+        expect(
+          doc.blocks[0],
+          isA<HeadingBlock>().having((h) => h.level, 'level', 1),
+        );
+        expect(
+          doc.blocks[1],
+          isA<HeadingBlock>().having((h) => h.level, 'level', 2),
+        );
+        expect(
+          doc.blocks[2],
+          isA<ParagraphBlock>(),
+          reason: 'Author only inherits Title via basedOn; it is not a heading',
+        );
+      },
+    );
+  });
+
+  group('Monospace character style (w:rStyle) becomes inline code', () {
+    const verbatimStyles =
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="character" w:styleId="VerbatimChar"><w:name w:val="Verbatim Char"/><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr></w:style>
+</w:styles>''';
+
+    test('run carrying a Consolas character style renders as code', () async {
+      final body = wP(
+        innerXml: wR(
+          text: 'snippet',
+          rPrXml: '<w:rStyle w:val="VerbatimChar"/>',
+        ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: verbatimStyles,
+      );
+      final doc = await parseDocument(bytes);
+      final para = doc.blocks.single as ParagraphBlock;
+      expect(
+        para.inlines.single,
+        isA<CodeInline>().having((c) => c.text, 'text', 'snippet'),
+      );
+    });
+
+    test('code run with superscript composes <sup> around the code', () async {
+      final body = wP(
+        innerXml:
+            wR(text: 'm', rPrXml: '<w:rStyle w:val="VerbatimChar"/>') +
+            wR(
+              text: '2',
+              rPrXml:
+                  '<w:rStyle w:val="VerbatimChar"/><w:vertAlign w:val="superscript"/>',
+            ),
+      );
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: verbatimStyles,
+      );
+      final doc = await parseDocument(bytes);
+      final para = doc.blocks.single as ParagraphBlock;
+      expect(para.inlines, hasLength(2));
+      expect(
+        para.inlines[0],
+        isA<CodeInline>().having((c) => c.text, 'text', 'm'),
+      );
+      final sup = para.inlines[1] as SupInline;
+      expect(
+        sup.children.single,
+        isA<CodeInline>().having((c) => c.text, 'text', '2'),
+        reason: 'superscript must wrap the code, not replace it',
+      );
+
+      final md = await DocxConverter(bytes).convert();
+      expect(md, contains('<sup>'));
+      expect(md, contains('`2`'));
+    });
+  });
 }

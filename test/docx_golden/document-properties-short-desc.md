@@ -1,9 +1,5 @@
-#
+# Testing custom properties
 
-      Testing custom properties
-
-#
-
-      A. M.
+A. M.
 
 Testing document properties

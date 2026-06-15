@@ -589,6 +589,23 @@ class DocxParser {
         }
         break;
 
+      // Property and marker elements never carry inline content. Skipping them
+      // explicitly prevents a whitespace-formatted <w:pPr> (or similar) from
+      // being treated as an unknown inline, which would otherwise leak its
+      // inter-element whitespace into the paragraph text and emit a spurious
+      // `unsupported.inline` warning.
+      case 'pPr':
+      case 'rPr':
+      case 'sectPr':
+      case 'tblPr':
+      case 'trPr':
+      case 'tcPr':
+      case 'tblGrid':
+      case 'bookmarkEnd':
+      case 'proofErr':
+      case 'lastRenderedPageBreak':
+        break;
+
       default:
         // Fallback for unknown containers that might hold text
         if (child.descendants.whereType<XmlElement>().any(
@@ -743,11 +760,19 @@ class DocxParser {
   }) {
     if (rPr == null) return base;
 
-    if (_isCodeRun(rPr)) {
-      if (base case TextInline(:final text)) {
-        return CodeInline(text);
+    Inline node = base;
+
+    // Inline code (monospace font/shading, or a monospace character style) is
+    // the innermost wrapper so emphasis and sub/superscript compose around it
+    // instead of being dropped (e.g. a superscripted `2` in a Verbatim run
+    // must render as `<sup>`2`</sup>`, not a bare `2`).
+    final isCode = _isCodeRun(rPr);
+    if (isCode) {
+      if (node case TextInline(:final text)) {
+        node = CodeInline(text);
+      } else {
+        node = HtmlInline(_inlineToPlainText(node));
       }
-      return HtmlInline(_inlineToPlainText(base));
     }
 
     final bold = _isAnyOnOff(rPr, const ['b', 'bCs']);
@@ -756,8 +781,6 @@ class DocxParser {
     final underline = _isOnOff(rPr, 'u');
 
     final vertAlign = _attrLocal(_firstChildByLocal(rPr, 'vertAlign'), 'val');
-
-    Inline node = base;
 
     if (underline) node = UnderlineInline([node]);
     if (strike) node = StrikeInline([node]);
@@ -770,17 +793,21 @@ class DocxParser {
     // Highlight (w:highlight) and text color (w:color) wrap the formatted run.
     // They are always parsed into the IR for fidelity; the renderer drops them
     // when the corresponding mode is `none` (mirroring UnderlineMode.ignore).
-    // Shaded runs are intercepted earlier by the _isCodeRun early return, so
-    // there is no conflict with w:shd here.
-    final color = _attrLocal(_firstChildByLocal(rPr, 'color'), 'val');
-    if (color != null && color.isNotEmpty && color.toLowerCase() != 'auto') {
-      node = ColorInline([node], color: color);
-    }
-    final highlight = _attrLocal(_firstChildByLocal(rPr, 'highlight'), 'val');
-    if (highlight != null &&
-        highlight.isNotEmpty &&
-        highlight.toLowerCase() != 'none') {
-      node = HighlightInline([node], color: highlight);
+    // Code takes precedence over these treatments: a run rendered as inline
+    // code (including a shaded run via treatShadedRunsAsCode) is not also
+    // wrapped in highlight/color, since w:shd and w:highlight share the same
+    // background/color channel.
+    if (!isCode) {
+      final color = _attrLocal(_firstChildByLocal(rPr, 'color'), 'val');
+      if (color != null && color.isNotEmpty && color.toLowerCase() != 'auto') {
+        node = ColorInline([node], color: color);
+      }
+      final highlight = _attrLocal(_firstChildByLocal(rPr, 'highlight'), 'val');
+      if (highlight != null &&
+          highlight.isNotEmpty &&
+          highlight.toLowerCase() != 'none') {
+        node = HighlightInline([node], color: highlight);
+      }
     }
 
     return node;
@@ -814,6 +841,13 @@ class DocxParser {
     }
     if (config.treatShadedRunsAsCode &&
         _firstChildByLocal(rPr, 'shd') != null) {
+      return true;
+    }
+    // A character style (w:rStyle) can carry the monospace font instead of an
+    // inline w:rFonts. Pandoc/Word emit inline code via a "Verbatim Char"
+    // character style (Consolas), so resolve it through the style chain.
+    final rStyle = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
+    if (rStyle != null && styles.isCodeCharacterStyle(rStyle)) {
       return true;
     }
     return false;

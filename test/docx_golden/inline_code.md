@@ -1,1 +1,1 @@
-This is an example of inline   code with three spaces.
+This is an example of `inline   code` with three spaces.
