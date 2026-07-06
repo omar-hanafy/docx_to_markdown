@@ -1,0 +1,148 @@
+---
+import Base from '../layouts/Base.astro';
+import PageHero from '../components/PageHero.astro';
+import Icon from '../components/Icon.astro';
+import { SITE } from '../consts';
+import { breadcrumbSchema } from '../lib/schema';
+import { withBase } from '../lib/url';
+import '../styles/prose.css';
+
+const site = Astro.site ?? new URL('https://docx-to-markdown.dev');
+
+const stack = [
+  ['Astro', 'Static, near-zero-JS site for fast pages and clean SEO'],
+  ['docx_to_markdown', 'The Dart conversion engine, compiled to JavaScript'],
+  ['Client-side only', 'No backend - conversion happens in your browser'],
+];
+---
+
+<Base
+  title="About"
+  description="About this DOCX to Markdown converter - a privacy-first tool built by Omar Hanafy to showcase the open-source docx_to_markdown Dart package."
+  path="/about"
+  jsonLd={[breadcrumbSchema(site, [
+    { name: 'Home', path: '/' },
+    { name: 'About', path: '/about' },
+  ])]}
+>
+  <PageHero eyebrow="About" title="A converter, a demo, and a bit of craft." />
+
+  <section class="section">
+    <div class="container">
+      <div class="prose">
+        <p class="lead">
+          This is a free, privacy-first tool for turning Word documents into
+          clean Markdown - and it doubles as a living demo of the open-source
+          engine that powers it.
+        </p>
+
+        <h2>Why it exists</h2>
+        <p>
+          I wrote <a href={SITE.pubDev} target="_blank" rel="noopener"
+            >docx_to_markdown</a
+          >, a pure-Dart package that converts <code>.docx</code> files to
+          Markdown with Pandoc-level fidelity. A package is easier to trust when
+          you can <em>see</em> it work, so I built this site to be three things at
+          once: a genuinely useful converter, a showcase for the package, and a
+          piece I'm happy to put in my portfolio.
+        </p>
+
+        <h2>How it stays private</h2>
+        <p>
+          There is no server doing the conversion. The Dart package is compiled
+          to JavaScript and runs entirely in your browser, so your document never
+          leaves your device. That makes it safe for confidential files - and it
+          keeps the tool free to run.
+        </p>
+
+        <h2>What it's built with</h2>
+      </div>
+
+      <ul class="stack">
+        {
+          stack.map(([name, desc]) => (
+            <li class="stack-item">
+              <span class="stack-name">{name}</span>
+              <span class="stack-desc">{desc}</span>
+            </li>
+          ))
+        }
+      </ul>
+
+      <div class="about-cta">
+        <p class="about-by">Built by <strong>{SITE.author}</strong></p>
+        <div class="about-links">
+          <a class="btn btn-ghost" href={SITE.authorGithub} target="_blank" rel="noopener">
+            <Icon name="github" size={16} /> GitHub
+          </a>
+          <a class="btn btn-ghost" href={SITE.pubDev} target="_blank" rel="noopener">
+            <Icon name="arrow-up-right" size={15} /> pub.dev
+          </a>
+          <a class="btn btn-primary" href={withBase('/')}>Try the converter <Icon name="arrow-right" size={16} /></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .stack {
+    list-style: none;
+    padding: 0;
+    margin-top: 1.25rem;
+    max-width: var(--measure);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .stack-item {
+    display: grid;
+    grid-template-columns: 12rem 1fr;
+    gap: 1rem;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .stack-item:last-child {
+    border-bottom: none;
+  }
+  .stack-name {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--violet);
+    font-size: 0.92rem;
+  }
+  .stack-desc {
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+
+  .about-cta {
+    margin-top: 3rem;
+    padding-top: 1.75rem;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .about-by {
+    font-size: var(--text-md);
+    color: var(--muted);
+  }
+  .about-by strong {
+    color: var(--ink);
+  }
+  .about-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+
+  @media (max-width: 620px) {
+    .stack-item {
+      grid-template-columns: 1fr;
+      gap: 0.2rem;
+    }
+  }
+</style>

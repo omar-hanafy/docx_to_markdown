@@ -1,0 +1,29 @@
+{
+  "name": "docx-to-markdown-website",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Converter tool + showcase site for the docx_to_markdown Dart package.",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "build:bridge": "bash scripts/build-bridge.sh",
+    "deploy": "bash scripts/deploy.sh"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.2.1",
+    "@fontsource-variable/bricolage-grotesque": "^5.1.0",
+    "@fontsource-variable/hanken-grotesk": "^5.1.0",
+    "@fontsource/ibm-plex-mono": "^5.1.0",
+    "astro": "^5.2.5",
+    "dompurify": "^3.2.4",
+    "jszip": "^3.10.1",
+    "marked": "^15.0.6"
+  },
+  "devDependencies": {
+    "docx": "^9.7.1"
+  }
+}

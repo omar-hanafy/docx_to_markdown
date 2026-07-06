@@ -1,0 +1,68 @@
+---
+import { SITE } from '../consts';
+import { withBase } from '../lib/url';
+
+interface Props {
+  title: string;
+  description?: string;
+  /** Path only, e.g. "/features". Canonical is derived from Astro.site. */
+  path?: string;
+  /** Override the social share image (absolute or root-relative path). */
+  image?: string;
+  /** When true, the page <title> is used as-is (no site suffix). */
+  rawTitle?: boolean;
+  /** Structured-data objects to embed as JSON-LD. */
+  jsonLd?: Record<string, unknown>[];
+  noindex?: boolean;
+}
+
+const {
+  title,
+  description = SITE.description,
+  path = '/',
+  image = SITE.ogImage,
+  rawTitle = false,
+  jsonLd = [],
+  noindex = false,
+} = Astro.props;
+
+const site = Astro.site ?? new URL('https://docx-to-markdown.dev');
+// withBase folds in the deploy subpath so canonical/OG URLs are correct whether
+// hosted at a domain root or under omar-hanafy.github.io/docx-to-markdown/.
+const canonical = new URL(withBase(path), site).href.replace(/\/$/, '') || site.href;
+const imageUrl = new URL(withBase(image), site).href;
+const fullTitle = rawTitle ? title : `${title} · ${SITE.name}`;
+
+// Escape "<" so a stray sequence can never break out of the JSON-LD script.
+const ld = (obj: Record<string, unknown>) =>
+  JSON.stringify(obj).replace(/</g, '\\u003c');
+---
+
+<title>{fullTitle}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonical} />
+{noindex && <meta name="robots" content="noindex, nofollow" />}
+
+<meta name="author" content={SITE.author} />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content={SITE.name} />
+<meta property="og:title" content={fullTitle} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonical} />
+<meta property="og:image" content={imageUrl} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={fullTitle} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={imageUrl} />
+
+{
+  jsonLd.map((obj) => (
+    <script type="application/ld+json" set:html={ld(obj)} />
+  ))
+}

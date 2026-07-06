@@ -17,3 +17,12 @@ docs_guide.md
 .idea/
 .vscode/
 .DS_Store
+
+# Local scratch / not part of the package
+reddit_post.txt
+
+# Marketing / demo website and its Dart->JS bridge (not part of the package)
+website/
+
+# Design specs and internal docs
+docs/

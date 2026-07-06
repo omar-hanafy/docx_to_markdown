@@ -1,0 +1,113 @@
+---
+import { SITE } from '../../consts';
+
+const steps = [
+  {
+    n: '01',
+    title: 'Drop your .docx',
+    body: 'Choose a file or drag it onto the page. It is read straight into memory in your browser - nothing is uploaded to a server.',
+  },
+  {
+    n: '02',
+    title: 'Parsed into a structured model',
+    body: 'The Office Open XML is parsed into an intermediate representation - a real tree of headings, lists, tables and runs - not a bag of text. This is why structure survives.',
+  },
+  {
+    n: '03',
+    title: 'Rendered to faithful Markdown',
+    body: 'That model is rendered to GitHub Flavored or CommonMark Markdown, tuned by your options. Copy it, download the .md, or grab a .zip with images.',
+  },
+];
+---
+
+<section class="section how" id="how-it-works">
+  <div class="container">
+    <div class="sec-head">
+      <p class="eyebrow">How it works</p>
+      <h2 class="sec-title">Three steps, all on your machine.</h2>
+    </div>
+
+    <ol class="steps">
+      {
+        steps.map((s) => (
+          <li class="step">
+            <span class="step-n">{s.n}</span>
+            <h3 class="step-title">{s.title}</h3>
+            <p class="step-body">{s.body}</p>
+          </li>
+        ))
+      }
+    </ol>
+
+    <p class="how-foot">
+      The conversion engine is the open-source
+      <a href={SITE.pubDev} target="_blank" rel="noopener">{SITE.packageName}</a>
+      Dart package, compiled to JavaScript so it runs right here in your browser.
+    </p>
+  </div>
+</section>
+
+<style>
+  .sec-head {
+    max-width: 56ch;
+    margin-bottom: clamp(2rem, 5vw, 3rem);
+  }
+  .sec-title {
+    font-size: var(--text-2xl);
+    margin-top: 0.7rem;
+  }
+
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: clamp(1.5rem, 4vw, 3rem);
+    list-style: none;
+    padding: 0;
+    counter-reset: none;
+  }
+  .step {
+    position: relative;
+    padding-top: 1.5rem;
+    border-top: 2px solid var(--line-strong);
+  }
+  .step-n {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--violet);
+    letter-spacing: var(--tracking-wide);
+  }
+  .step-title {
+    font-family: var(--font-body);
+    font-size: 1.12rem;
+    font-weight: 650;
+    letter-spacing: 0;
+    margin-top: 0.7rem;
+  }
+  .step-body {
+    margin-top: 0.6rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+
+  .how-foot {
+    margin-top: clamp(2rem, 5vw, 3rem);
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    max-width: 60ch;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  .how-foot a {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+
+  @media (max-width: 720px) {
+    .steps {
+      grid-template-columns: 1fr;
+      gap: 1.75rem;
+    }
+  }
+</style>

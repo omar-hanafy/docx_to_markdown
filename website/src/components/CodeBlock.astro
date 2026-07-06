@@ -1,0 +1,96 @@
+---
+import Icon from './Icon.astro';
+
+interface Props {
+  code: string;
+  lang?: string;
+  filename?: string;
+  copy?: boolean;
+}
+const { code, lang, filename, copy = true } = Astro.props;
+const label = filename ?? lang;
+---
+
+<div class="codeblock">
+  {
+    (label || copy) && (
+      <div class="cb-head">
+        <span class="cb-label">{label}</span>
+        {copy && (
+          <button class="cb-copy" type="button" data-copy-code aria-label="Copy code">
+            <Icon name="copy" size={14} />
+          </button>
+        )}
+      </div>
+    )
+  }
+  <pre class="cb-pre"><code>{code.trim()}</code></pre>
+</div>
+
+<style>
+  .codeblock {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .cb-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0.5rem 0.4rem 0.9rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .cb-label {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--faint);
+    letter-spacing: var(--tracking-wide);
+  }
+  .cb-copy {
+    display: inline-grid;
+    place-items: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: var(--radius-sm);
+    color: var(--faint);
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out);
+  }
+  .cb-copy:hover {
+    color: var(--ink);
+    background: var(--surface);
+  }
+  .cb-copy.is-done {
+    color: #12805c;
+  }
+  :global(:root[data-theme='dark']) .cb-copy.is-done {
+    color: #34d399;
+  }
+  .cb-pre {
+    margin: 0;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.83rem;
+    line-height: 1.65;
+    color: var(--ink-soft);
+    tab-size: 2;
+  }
+</style>
+
+<script>
+  document.querySelectorAll('[data-copy-code]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const code = btn.closest('.codeblock')?.querySelector('code')?.textContent ?? '';
+      try {
+        await navigator.clipboard.writeText(code);
+        btn.classList.add('is-done');
+        window.setTimeout(() => btn.classList.remove('is-done'), 1400);
+      } catch {
+        /* clipboard unavailable */
+      }
+    });
+  });
+</script>

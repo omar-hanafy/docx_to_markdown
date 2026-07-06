@@ -4,6 +4,8 @@
 
 Convert Word `.docx` (OOXML) files to clean, deterministic Markdown - in pure Dart.
 
+> **▶ Try it live at [omar-hanafy.github.io/docx-to-markdown](https://omar-hanafy.github.io/docx-to-markdown/)** - drop a `.docx`, preview the Markdown, copy or download it. The demo runs this exact package compiled to JavaScript, entirely in your browser; nothing is uploaded.
+
 `docx_to_markdown` parses a document into a structured intermediate representation (IR) and *then* renders it, rather than scraping text run by run. That extra step is what buys **Pandoc-level structural fidelity** - deeply nested lists, complex tables, footnotes, math, and definition lists survive the trip - while keeping the package **100% pure Dart with zero native dependencies**. It runs anywhere Dart runs: server, CLI, Flutter on Android, iOS, macOS, Windows, Linux, and browser-based Flutter web apps.
 
 ```dart
@@ -266,6 +268,12 @@ This package aims for "Pandoc-level" quality in pure Dart. It treats a `.docx` n
 ## Contributing
 
 Contributions are welcome. See [`docs_guide.md`](docs_guide.md) for the documentation philosophy this codebase follows ("Describe the Behavior, Not Just the Data").
+
+## Support
+
+This package is free and MIT-licensed. If it saved you time, you can support ongoing development by buying me a coffee:
+
+[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=omar.hanafy&button_colour=FFDD00&font_colour=000000&font_family=Comic&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/omar.hanafy)
 
 ## License
 

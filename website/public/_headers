@@ -1,0 +1,24 @@
+# Caching + security headers. Honored by Cloudflare Pages and Netlify.
+# (Vercel users: mirror these in vercel.json.)
+
+# Content-hashed build assets never change - cache them hard.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Fonts are hashed by Astro too.
+/*.woff2
+  Cache-Control: public, max-age=31536000, immutable
+
+# The converter engine and sample live at stable paths and can be regenerated,
+# so revalidate daily rather than caching forever.
+/converter/*
+  Cache-Control: public, max-age=3600, must-revalidate
+/sample.docx
+  Cache-Control: public, max-age=3600
+
+# Sensible security defaults for every response.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Permissions-Policy: geolocation=(), camera=(), microphone=()

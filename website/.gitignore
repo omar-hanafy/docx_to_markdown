@@ -1,0 +1,16 @@
+# build output
+dist/
+.astro/
+
+# deps
+node_modules/
+
+# dart bridge build artifacts (the compiled converter.js IS committed; its
+# sidecars and tool caches are not)
+bridge/.dart_tool/
+public/converter/*.deps
+
+# env / os
+.env
+.env.production
+.DS_Store

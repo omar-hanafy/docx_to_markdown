@@ -1,0 +1,90 @@
+---
+import Icon from '../Icon.astro';
+import { CAPABILITIES } from '../../data/features';
+---
+
+<section class="section" id="features">
+  <div class="container">
+    <div class="sec-head">
+      <p class="eyebrow">Fidelity</p>
+      <h2 class="sec-title">Structure survives the trip.</h2>
+      <p class="sec-lead">
+        Most converters scrape text run by run and lose the shape of your
+        document. This one reads the whole file into a structured model first,
+        then renders it - so tables stay tables and lists stay lists.
+      </p>
+    </div>
+
+    <ul class="cap-grid">
+      {
+        CAPABILITIES.map((c) => (
+          <li class="cap-card">
+            <span class="cap-icon">
+              <Icon name={c.icon} size={19} />
+            </span>
+            <h3 class="cap-title">{c.title}</h3>
+            <p class="cap-desc">{c.desc}</p>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .sec-head {
+    max-width: 56ch;
+    margin-bottom: clamp(2rem, 5vw, 3.25rem);
+  }
+  .sec-title {
+    font-size: var(--text-2xl);
+    margin-top: 0.7rem;
+  }
+  .sec-lead {
+    margin-top: 1rem;
+    color: var(--muted);
+    font-size: var(--text-md);
+  }
+
+  .cap-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 17.5rem), 1fr));
+    gap: 1px;
+    list-style: none;
+    padding: 0;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .cap-card {
+    background: var(--surface);
+    padding: 1.5rem;
+    transition: background-color var(--dur) var(--ease-out);
+  }
+  .cap-card:hover {
+    background: var(--surface-2);
+  }
+  .cap-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: var(--radius);
+    background: var(--violet-wash);
+    color: var(--violet);
+    margin-bottom: 0.9rem;
+  }
+  .cap-title {
+    font-family: var(--font-body);
+    font-size: 1.02rem;
+    font-weight: 650;
+    letter-spacing: 0;
+  }
+  .cap-desc {
+    margin-top: 0.4rem;
+    font-size: 0.92rem;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+</style>

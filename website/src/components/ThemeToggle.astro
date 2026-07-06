@@ -1,0 +1,70 @@
+---
+import Icon from './Icon.astro';
+---
+
+<button
+  class="theme-toggle"
+  type="button"
+  aria-label="Switch between light and dark theme"
+  title="Toggle theme"
+  data-theme-toggle
+>
+  <span class="i-moon"><Icon name="moon" size={18} /></span>
+  <span class="i-sun"><Icon name="sun" size={18} /></span>
+</button>
+
+<style>
+  .theme-toggle {
+    display: inline-grid;
+    place-items: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: var(--radius);
+    color: var(--muted);
+    border: 1px solid transparent;
+    transition: background-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out);
+  }
+
+  .theme-toggle:hover {
+    color: var(--ink);
+    background: var(--surface-2);
+    border-color: var(--line);
+  }
+
+  .i-sun {
+    display: none;
+  }
+  .i-moon {
+    display: inline-flex;
+  }
+
+  :global(:root[data-theme='dark']) .i-sun {
+    display: inline-flex;
+  }
+  :global(:root[data-theme='dark']) .i-moon {
+    display: none;
+  }
+</style>
+
+<script>
+  const KEY = 'theme';
+  const root = document.documentElement;
+
+  function currentTheme() {
+    return root.dataset.theme === 'dark' ? 'dark' : 'light';
+  }
+
+  for (const btn of document.querySelectorAll('[data-theme-toggle]')) {
+    btn.addEventListener('click', () => {
+      const next = currentTheme() === 'dark' ? 'light' : 'dark';
+      root.dataset.theme = next;
+      try {
+        localStorage.setItem(KEY, next);
+      } catch {
+        /* private mode - fine, just no persistence */
+      }
+    });
+  }
+</script>

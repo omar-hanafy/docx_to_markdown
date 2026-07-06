@@ -1,0 +1,129 @@
+/*
+ * Design tokens - the single source of truth for the visual system.
+ *
+ * Concept: the "transformation duality". A warm, formatted DOCUMENT world
+ * (rust, serif) cooling into a precise, plain MARKDOWN world (violet, mono).
+ * Light is the default "paper" theme; dark is a considered "editor" theme.
+ */
+
+:root {
+  /* --- Brand ---------------------------------------------------------- */
+  --violet: #6d28d9; /* structure / markdown / primary action */
+  --violet-ink: #5b21b6; /* hover / pressed */
+  --violet-wash: #f1ecfb; /* tinted fills */
+  --rust: #c2410c; /* the source-document warmth / secondary */
+  --rust-wash: #fbede6;
+
+  /* --- Neutrals (light "paper") -------------------------------------- */
+  --paper: #fbfaf7; /* page background - clean, faintly warm (not cream) */
+  --surface: #ffffff; /* cards, panels */
+  --surface-2: #f4f2ec; /* inset / raised warm tint */
+  --ink: #191a21; /* primary text - blue-black */
+  --ink-soft: #383a44; /* strong-but-not-primary text */
+  --muted: #585a66; /* secondary text */
+  --faint: #83858f; /* tertiary / placeholders */
+  --line: #e7e4dc; /* hairline borders */
+  --line-strong: #d7d3c8;
+
+  /* --- Markdown syntax tokens (used in the output panel + code) ------- */
+  --tok-heading: #9a3412; /* '#' and headings - deep rust */
+  --tok-mark: #6d28d9; /* markers: * _ > - | - violet */
+  --tok-link: #0e7490; /* links / strings - teal */
+  --tok-emph: #383a44; /* emphasized text */
+  --tok-comment: #83858f;
+
+  /* --- Typography ----------------------------------------------------- */
+  --font-display: 'Bricolage Grotesque Variable', 'Bricolage Grotesque',
+    system-ui, sans-serif;
+  --font-body: 'Hanken Grotesk Variable', 'Hanken Grotesk', system-ui,
+    -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'SFMono-Regular', Menlo,
+    Consolas, monospace;
+  /* The "source document" voice - a system serif, on-theme with Word. */
+  --font-serif: 'Cambria', 'Iowan Old Style', 'Palatino Linotype', 'Georgia',
+    serif;
+
+  /* Fluid type scale (major-third-ish, clamped for responsiveness). */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: clamp(1rem, 0.97rem + 0.15vw, 1.0625rem);
+  --text-md: clamp(1.125rem, 1.08rem + 0.25vw, 1.25rem);
+  --text-lg: clamp(1.3rem, 1.2rem + 0.5vw, 1.6rem);
+  --text-xl: clamp(1.55rem, 1.35rem + 1vw, 2.15rem);
+  --text-2xl: clamp(1.8rem, 1.5rem + 1.7vw, 3.15rem);
+  --text-3xl: clamp(2rem, 1.25rem + 3.6vw, 4.4rem);
+
+  --leading-tight: 1.08;
+  --leading-snug: 1.28;
+  --leading-normal: 1.62;
+  --tracking-tight: -0.02em;
+  --tracking-wide: 0.02em;
+  --tracking-eyebrow: 0.14em;
+
+  /* --- Space (4px base) ---------------------------------------------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 2.75rem;
+  --space-8: 3.5rem;
+  --space-9: 4.5rem;
+  --space-10: 6rem;
+  --space-12: 8rem;
+
+  /* --- Radius / shadow / layout -------------------------------------- */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgba(25, 26, 33, 0.04),
+    0 2px 8px rgba(25, 26, 33, 0.05);
+  --shadow-2: 0 4px 12px rgba(25, 26, 33, 0.07),
+    0 16px 40px rgba(25, 26, 33, 0.09);
+  --shadow-focus: 0 0 0 3px var(--violet-wash), 0 0 0 1px var(--violet);
+
+  --container: 1140px;
+  --container-narrow: 760px;
+  --measure: 66ch;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 140ms;
+  --dur: 260ms;
+  --dur-slow: 520ms;
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --violet: #a78bfa;
+  --violet-ink: #c4b5fd;
+  --violet-wash: #251f38;
+  --rust: #fb7a45;
+  --rust-wash: #2f1d14;
+
+  --paper: #131419; /* blue-black editor ground */
+  --surface: #1a1c23;
+  --surface-2: #212430;
+  --ink: #eae9ef;
+  --ink-soft: #cccdd6;
+  --muted: #9a9ca8;
+  --faint: #6d6f7d;
+  --line: #292b35;
+  --line-strong: #383b47;
+
+  --tok-heading: #fba574;
+  --tok-mark: #a78bfa;
+  --tok-link: #38cfe6;
+  --tok-emph: #cccdd6;
+  --tok-comment: #6d6f7d;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.4), 0 22px 50px rgba(0, 0, 0, 0.5);
+  --shadow-focus: 0 0 0 3px var(--violet-wash), 0 0 0 1px var(--violet);
+
+  color-scheme: dark;
+}
