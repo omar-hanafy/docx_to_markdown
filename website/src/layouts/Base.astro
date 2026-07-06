@@ -1,0 +1,113 @@
+---
+// Self-hosted fonts (no external requests -> CSP-clean, fast, private).
+import '@fontsource-variable/bricolage-grotesque';
+import '@fontsource-variable/hanken-grotesk';
+import '@fontsource/ibm-plex-mono/400.css';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
+
+import '../styles/tokens.css';
+import '../styles/global.css';
+
+import { SITE } from '../consts';
+import { withBase } from '../lib/url';
+import Seo from '../components/Seo.astro';
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+  path?: string;
+  image?: string;
+  rawTitle?: boolean;
+  jsonLd?: Record<string, unknown>[];
+  noindex?: boolean;
+}
+
+const {
+  title,
+  description,
+  path = Astro.url.pathname,
+  image,
+  rawTitle,
+  jsonLd,
+  noindex,
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Set the theme before first paint to avoid a flash. -->
+    <script is:inline>
+      (function () {
+        try {
+          var forced = new URLSearchParams(location.search).get('theme');
+          var t =
+            forced === 'light' || forced === 'dark'
+              ? forced
+              : localStorage.getItem('theme');
+          if (t !== 'light' && t !== 'dark') {
+            t = window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light';
+          }
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+
+    <Seo
+      title={title}
+      description={description}
+      path={path}
+      image={image}
+      rawTitle={rawTitle}
+      jsonLd={jsonLd}
+      noindex={noindex}
+    />
+
+    <meta
+      name="theme-color"
+      content={SITE.themeColor}
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content={SITE.themeColorDark}
+      media="(prefers-color-scheme: dark)"
+    />
+
+    <link rel="icon" href={withBase('/favicon.svg')} type="image/svg+xml" />
+    <link rel="icon" href={withBase('/favicon.ico')} sizes="32x32" />
+    <link rel="apple-touch-icon" href={withBase('/apple-touch-icon.png')} />
+    <link rel="sitemap" href={withBase('/sitemap-index.xml')} />
+    <link rel="manifest" href={withBase('/site.webmanifest')} />
+    <meta name="generator" content={Astro.generator} />
+
+    {/*
+      Analytics (optional, privacy-friendly). This tool never sees file
+      contents; keep it that way by choosing a cookieless analytics provider
+      and adding its snippet here. Examples:
+        - Cloudflare Web Analytics: paste the <script defer ...> beacon tag.
+        - Plausible:  <script defer data-domain="your-domain" src="https://plausible.io/js/script.js"></script>
+        - Umami:      <script defer data-website-id="..." src="https://.../script.js"></script>
+      Left intentionally empty - no keys are hardcoded.
+    */}
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <Header />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

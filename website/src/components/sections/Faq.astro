@@ -1,0 +1,102 @@
+---
+import Icon from '../Icon.astro';
+import { withBase } from '../../lib/url';
+import { FAQS } from '../../data/faq';
+---
+
+<section class="section faq" id="faq">
+  <div class="container faq-grid">
+    <div class="faq-head">
+      <p class="eyebrow">FAQ</p>
+      <h2 class="sec-title">Questions, answered.</h2>
+      <p class="faq-lead">
+        Everything about privacy, formats and fidelity. Still stuck? The
+        <a href={withBase('/guides/convert-docx-to-markdown')}>full guide</a> goes deeper.
+      </p>
+    </div>
+
+    <div class="faq-list">
+      {
+        FAQS.map((f, i) => (
+          <details class="faq-item" open={i === 0}>
+            <summary>
+              <span>{f.q}</span>
+              <span class="faq-chevron"><Icon name="chevron-down" size={18} /></span>
+            </summary>
+            <p>{f.a}</p>
+          </details>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .faq-grid {
+    display: grid;
+    grid-template-columns: 0.8fr 1.2fr;
+    gap: clamp(2rem, 5vw, 4rem);
+    align-items: start;
+  }
+  .faq-head {
+    position: sticky;
+    top: 6rem;
+  }
+  .sec-title {
+    font-size: var(--text-2xl);
+    margin-top: 0.7rem;
+  }
+  .faq-lead {
+    margin-top: 1rem;
+    color: var(--muted);
+    font-size: 0.98rem;
+    max-width: 34ch;
+  }
+
+  .faq-list {
+    border-top: 1px solid var(--line);
+  }
+  .faq-item {
+    border-bottom: 1px solid var(--line);
+  }
+  .faq-item summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.15rem 0;
+    cursor: pointer;
+    list-style: none;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .faq-item summary::-webkit-details-marker {
+    display: none;
+  }
+  .faq-chevron {
+    flex: none;
+    color: var(--faint);
+    transition: transform var(--dur) var(--ease-out);
+  }
+  .faq-item[open] .faq-chevron {
+    transform: rotate(180deg);
+    color: var(--violet);
+  }
+  .faq-item p {
+    padding-bottom: 1.2rem;
+    margin-top: -0.2rem;
+    max-width: 62ch;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  @media (max-width: 760px) {
+    .faq-grid {
+      grid-template-columns: 1fr;
+    }
+    .faq-head {
+      position: static;
+    }
+  }
+</style>

@@ -1,0 +1,708 @@
+---
+import { tokenizeMarkdown } from '../lib/highlight';
+import { SAMPLE_MARKDOWN, SAMPLE_FILENAME } from '../data/sample';
+import Icon from './Icon.astro';
+import '../styles/converter.css';
+
+// The output panel is pre-rendered from the real sample at build time, so the
+// hero is instant, crawlable, and needs zero JavaScript to look complete.
+const sampleTokens = tokenizeMarkdown(SAMPLE_MARKDOWN);
+
+const advSelects = [
+  {
+    opt: 'tableMode',
+    label: 'Tables',
+    options: [
+      ['auto', 'Auto (pipes + HTML)'],
+      ['markdownOnly', 'Markdown only'],
+      ['htmlOnly', 'HTML only'],
+    ],
+  },
+  {
+    opt: 'underlineMode',
+    label: 'Underline',
+    options: [
+      ['html', 'HTML <u>'],
+      ['plusPlus', '++text++'],
+      ['ignore', 'Drop'],
+    ],
+  },
+  {
+    opt: 'imageSizeMode',
+    label: 'Image sizing',
+    options: [
+      ['none', 'None'],
+      ['obsidian', 'Obsidian =WxH'],
+      ['pandoc', 'Pandoc {width}'],
+    ],
+  },
+  {
+    opt: 'definitionListMode',
+    label: 'Definition lists',
+    options: [
+      ['html', 'HTML <dl>'],
+      ['pandoc', 'Pandoc'],
+      ['paragraphs', 'Paragraphs'],
+    ],
+  },
+  {
+    opt: 'trackChangesMode',
+    label: 'Tracked changes',
+    options: [
+      ['acceptAll', 'Accept all'],
+      ['showDeletionsAsStrikethrough', 'Show deletions'],
+      ['rejectChanges', 'Reject all'],
+    ],
+  },
+  {
+    opt: 'orderedListNumbering',
+    label: 'Ordered lists',
+    options: [
+      ['alwaysOne', 'Normalize to 1.'],
+      ['keep', 'Keep source numbers'],
+    ],
+  },
+];
+
+const advChecks = [
+  { opt: 'includeHeadersFooters', label: 'Headers & footers' },
+  { opt: 'includeComments', label: 'Comments' },
+  { opt: 'includeEndnotes', label: 'Endnotes' },
+];
+---
+
+<section class="converter" data-converter aria-label="DOCX to Markdown converter">
+  <div class="conv-grid">
+    <!-- SOURCE (also the drop zone) -->
+    <div class="conv-panel conv-source" data-dropzone>
+      <div class="conv-head">
+        <span class="conv-tag conv-tag-src">Source</span>
+        <span class="conv-file" data-filename>{SAMPLE_FILENAME}</span>
+        <button class="conv-clear" data-clear hidden aria-label="Remove file and reset">
+          <Icon name="x" size={15} />
+        </button>
+      </div>
+
+      <div class="conv-source-body">
+        <div class="doc-mock" data-doc-mock aria-hidden="true">
+          <p class="doc-h1">Project Brief: Northwind Redesign</p>
+          <p>
+            The <b>Northwind</b> storefront is overdue for a <i>ground-up</i> redesign.
+            This brief captures the goals, the timeline, and the open questions.
+          </p>
+          <p class="doc-h2">Goals</p>
+          <ul>
+            <li>Cut time-to-first-purchase in half.</li>
+            <li>
+              Unify the design system across web and mobile.
+              <ul><li>Ship a reusable component library.</li></ul>
+            </li>
+            <li>Reach a Lighthouse score of 95+.</li>
+          </ul>
+          <p class="doc-h2">Timeline</p>
+          <table class="doc-table">
+            <thead>
+              <tr><th>Phase</th><th>Owner</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Discovery</td><td>Ana</td><td>Done</td></tr>
+              <tr><td>Design system</td><td>Priya</td><td>In progress</td></tr>
+              <tr><td>Build &amp; launch</td><td>Marco</td><td>Not started</td></tr>
+            </tbody>
+          </table>
+          <p class="doc-h2">A note on scope</p>
+          <blockquote>
+            Keep the first release small. Ship the checkout flow, measure, then
+            expand.
+          </blockquote>
+        </div>
+
+        <div class="conv-fileinfo" data-fileinfo hidden>
+          <span class="fi-icon"><Icon name="file-check" size={30} /></span>
+          <div>
+            <strong data-fileinfo-name></strong>
+            <span data-fileinfo-size></span>
+          </div>
+        </div>
+
+        <div class="conv-drop-hint" data-drop-hint>
+          <Icon name="download" size={22} />
+          <span>Drop your .docx here</span>
+        </div>
+      </div>
+
+      <div class="conv-source-foot">
+        <button class="btn btn-primary" data-choose type="button">
+          <Icon name="file-check" size={16} /> Choose a .docx
+        </button>
+        <button class="btn btn-ghost" data-sample type="button">Reset to sample</button>
+        <input
+          type="file"
+          accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          hidden
+          data-file-input
+        />
+      </div>
+    </div>
+
+    <!-- SEAM -->
+    <div class="conv-seam" aria-hidden="true">
+      <span class="seam-badge"><Icon name="arrow-right" size={16} stroke={2.2} /></span>
+    </div>
+
+    <!-- OUTPUT -->
+    <div class="conv-panel conv-output">
+      <div class="conv-head">
+        <div class="conv-tabs" role="tablist" aria-label="Output view">
+          <button class="conv-tab" role="tab" aria-selected="true" data-tab="markdown"
+            >Markdown</button
+          >
+          <button class="conv-tab" role="tab" aria-selected="false" data-tab="preview"
+            >Preview</button
+          >
+        </div>
+        <div class="conv-out-actions">
+          <button class="btn-icon" data-copy type="button" aria-label="Copy Markdown">
+            <Icon name="copy" size={15} /><span>Copy</span>
+          </button>
+          <button class="btn-icon" data-download type="button" aria-label="Download .md">
+            <Icon name="download" size={15} /><span>.md</span>
+          </button>
+          <button class="btn-icon" data-zip type="button" hidden aria-label="Download images as zip">
+            <Icon name="layers" size={15} /><span>.zip</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="conv-out-body">
+        <pre
+          class="md-source"
+          data-md-source
+          role="tabpanel"
+          tabindex="0"><code set:html={sampleTokens} /></pre>
+        <div class="md-preview" data-md-preview role="tabpanel" tabindex="0" hidden></div>
+        <div class="conv-loading" data-loading hidden>
+          <span class="conv-spinner"></span>
+          <span data-loading-text>Converting…</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPTIONS -->
+  <div class="conv-options" data-options>
+    <div class="opt-row">
+      <span class="opt-label">Flavor</span>
+      <div class="seg" role="group" aria-label="Markdown flavor">
+        <button class="seg-btn" data-opt="flavor" data-val="gfm" aria-pressed="true" type="button"
+          >GitHub</button
+        >
+        <button class="seg-btn" data-opt="flavor" data-val="commonmark" aria-pressed="false" type="button"
+          >CommonMark</button
+        >
+      </div>
+      <label class="opt-check">
+        <input type="checkbox" data-opt="extractImages" checked /> Images
+      </label>
+      <label class="opt-check">
+        <input type="checkbox" data-opt="includeFootnotes" checked /> Footnotes
+      </label>
+      <label class="opt-check">
+        <input type="checkbox" data-opt="metadataMode" /> Front matter
+      </label>
+      <button class="opt-adv-toggle" data-adv-toggle aria-expanded="false" type="button">
+        Advanced <Icon name="chevron-down" size={14} />
+      </button>
+    </div>
+
+    <div class="opt-adv" data-adv hidden>
+      {
+        advSelects.map((f) => (
+          <label class="opt-field">
+            <span>{f.label}</span>
+            <select data-opt={f.opt}>
+              {f.options.map(([v, l]) => <option value={v}>{l}</option>)}
+            </select>
+          </label>
+        ))
+      }
+      {
+        advChecks.map((c) => (
+          <label class="opt-field opt-check-field">
+            <input type="checkbox" data-opt={c.opt} />
+            <span>{c.label}</span>
+          </label>
+        ))
+      }
+    </div>
+  </div>
+
+  <div class="conv-foot">
+    <p class="conv-privacy">
+      <Icon name="lock" size={14} /> Runs entirely in your browser. Your file is never
+      uploaded.
+    </p>
+    <p class="conv-status" data-status role="status" aria-live="polite"></p>
+  </div>
+
+  <details class="conv-notes" data-notes hidden></details>
+</section>
+
+<script>
+  import { tokenizeMarkdown } from '../lib/highlight';
+  import { withBase } from '../lib/url';
+  import { SAMPLE_MARKDOWN, SAMPLE_SRC, SAMPLE_FILENAME } from '../data/sample';
+
+  type Img = {
+    path: string;
+    filename: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    blobUrl: string;
+  };
+  type Warning = { code: string; message: string; location: string };
+  type Result = {
+    markdown?: string;
+    images?: Img[];
+    warnings?: Warning[];
+    error?: string;
+  };
+  type ConvertFn = (bytes: Uint8Array, options: Record<string, unknown>) => Promise<Result>;
+
+  const root = document.querySelector<HTMLElement>('[data-converter]');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends Element = HTMLElement>(s: string) =>
+      root.querySelector<T>(s);
+    const qa = <T extends Element = HTMLElement>(s: string) =>
+      Array.from(root.querySelectorAll<T>(s));
+
+    const fileInput = q<HTMLInputElement>('[data-file-input]')!;
+    const source = q('[data-dropzone]')!;
+    const docMock = q('[data-doc-mock]')!;
+    const fileInfo = q('[data-fileinfo]')!;
+    const fileInfoName = q('[data-fileinfo-name]')!;
+    const fileInfoSize = q('[data-fileinfo-size]')!;
+    const filenameLabel = q('[data-filename]')!;
+    const clearBtn = q('[data-clear]')!;
+    const mdSource = q('[data-md-source]')!;
+    const mdSourceCode = mdSource.querySelector('code')!;
+    const mdPreview = q('[data-md-preview]')!;
+    const loading = q('[data-loading]')!;
+    const loadingText = q('[data-loading-text]')!;
+    const status = q('[data-status]')!;
+    const notes = q<HTMLDetailsElement>('[data-notes]')!;
+    const copyBtn = q('[data-copy]')!;
+    const downloadBtn = q('[data-download]')!;
+    const zipBtn = q('[data-zip]')!;
+    const advToggle = q('[data-adv-toggle]')!;
+    const adv = q('[data-adv]')!;
+
+    let markdown = SAMPLE_MARKDOWN;
+    let images: Img[] = [];
+    let warnings: Warning[] = [];
+    let name = SAMPLE_FILENAME;
+    let isSample = true;
+    let currentBytes: Uint8Array | null = null;
+    let sampleBytes: Uint8Array | null = null;
+    let currentTab: 'markdown' | 'preview' = 'markdown';
+    let previewDirty = true;
+
+    let convertFn: ConvertFn | null = null;
+    let bridgePromise: Promise<ConvertFn> | null = null;
+
+    const esc = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    function ensureBridge(): Promise<ConvertFn> {
+      if (convertFn) return Promise.resolve(convertFn);
+      if (bridgePromise) return bridgePromise;
+      loadingText.textContent = 'Loading converter…';
+      bridgePromise = new Promise<ConvertFn>((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = withBase('/converter/converter.js');
+        s.async = true;
+        s.onload = () => {
+          const t0 = performance.now();
+          const poll = () => {
+            const fn = (window as unknown as { docxToMarkdownConvert?: ConvertFn })
+              .docxToMarkdownConvert;
+            if (typeof fn === 'function') {
+              convertFn = fn;
+              resolve(fn);
+            } else if (performance.now() - t0 > 10000) {
+              reject(new Error('timeout'));
+            } else {
+              requestAnimationFrame(poll);
+            }
+          };
+          poll();
+        };
+        s.onerror = () => reject(new Error('network'));
+        document.head.appendChild(s);
+      });
+      return bridgePromise;
+    }
+
+    async function getSampleBytes(): Promise<Uint8Array> {
+      if (sampleBytes) return sampleBytes;
+      const res = await fetch(withBase(SAMPLE_SRC));
+      sampleBytes = new Uint8Array(await res.arrayBuffer());
+      return sampleBytes;
+    }
+
+    function readOptions(): Record<string, unknown> {
+      const pressed = q('[data-opt="flavor"][aria-pressed="true"]');
+      const sel = (opt: string, dflt: string) =>
+        q<HTMLSelectElement>(`select[data-opt="${opt}"]`)?.value ?? dflt;
+      const chk = (opt: string) =>
+        q<HTMLInputElement>(`input[data-opt="${opt}"]`)?.checked ?? false;
+      return {
+        flavor: (pressed as HTMLElement)?.dataset.val ?? 'gfm',
+        extractImages: chk('extractImages'),
+        includeFootnotes: chk('includeFootnotes'),
+        metadataMode: chk('metadataMode') ? 'yamlFrontMatter' : 'none',
+        includeHeadersFooters: chk('includeHeadersFooters'),
+        includeComments: chk('includeComments'),
+        includeEndnotes: chk('includeEndnotes'),
+        tableMode: sel('tableMode', 'auto'),
+        underlineMode: sel('underlineMode', 'html'),
+        imageSizeMode: sel('imageSizeMode', 'none'),
+        definitionListMode: sel('definitionListMode', 'html'),
+        trackChangesMode: sel('trackChangesMode', 'acceptAll'),
+        orderedListNumbering: sel('orderedListNumbering', 'alwaysOne'),
+      };
+    }
+
+    function setBusy(on: boolean) {
+      loading.hidden = !on;
+    }
+
+    function setStatus(text: string, isError = false) {
+      status.textContent = text;
+      status.classList.toggle('is-error', isError);
+    }
+
+    function renderSource() {
+      mdSourceCode.innerHTML = tokenizeMarkdown(markdown);
+    }
+
+    function renderNotes() {
+      if (!warnings.length) {
+        notes.hidden = true;
+        notes.innerHTML = '';
+        notes.open = false;
+        return;
+      }
+      const groups = new Map<string, number>();
+      for (const w of warnings) {
+        const key = w.message || w.code;
+        groups.set(key, (groups.get(key) ?? 0) + 1);
+      }
+      const items = [...groups.entries()]
+        .map(
+          ([msg, n]) =>
+            `<li>${esc(msg)}${n > 1 ? ` <code>×${n}</code>` : ''}</li>`,
+        )
+        .join('');
+      notes.innerHTML = `<summary>${groups.size} conversion note${
+        groups.size > 1 ? 's' : ''
+      }</summary><ul>${items}</ul>`;
+      notes.hidden = false;
+    }
+
+    function updateActions() {
+      zipBtn.hidden = images.length === 0;
+      if (images.length) {
+        zipBtn.querySelector('span')!.textContent = `.zip (${images.length})`;
+      }
+    }
+
+    function showFile() {
+      filenameLabel.textContent = name;
+      if (isSample) {
+        docMock.hidden = false;
+        fileInfo.hidden = true;
+        clearBtn.hidden = true;
+      } else {
+        docMock.hidden = true;
+        fileInfo.hidden = false;
+        clearBtn.hidden = false;
+      }
+    }
+
+    function formatSize(n: number) {
+      return n < 1024
+        ? `${n} B`
+        : n < 1024 * 1024
+          ? `${(n / 1024).toFixed(0)} KB`
+          : `${(n / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    function revokeImages() {
+      for (const im of images) URL.revokeObjectURL(im.blobUrl);
+    }
+
+    function applyResult(res: Result, fileName: string, sample: boolean, bytes: Uint8Array, ms: number) {
+      revokeImages();
+      images = (res.images ?? []).map((im) => ({
+        ...im,
+        blobUrl: URL.createObjectURL(
+          new Blob([im.bytes], { type: im.mimeType || 'application/octet-stream' }),
+        ),
+      }));
+      markdown = res.markdown ?? '';
+      warnings = res.warnings ?? [];
+      name = fileName;
+      isSample = sample;
+      currentBytes = bytes;
+      previewDirty = true;
+
+      renderSource();
+      renderNotes();
+      updateActions();
+      if (!sample) {
+        fileInfoName.textContent = fileName;
+        fileInfoSize.textContent = `${formatSize(bytes.length)} · ${images.length} image${images.length === 1 ? '' : 's'}`;
+      }
+      showFile();
+      if (currentTab === 'preview') renderPreview();
+
+      const imgNote = images.length ? ` · ${images.length} image${images.length === 1 ? '' : 's'}` : '';
+      setStatus(`Converted in ${ms < 1 ? '<1' : Math.round(ms)} ms${imgNote}`);
+    }
+
+    async function convertBytes(bytes: Uint8Array, fileName: string, sample: boolean) {
+      setBusy(true);
+      setStatus('');
+      try {
+        const fn = await ensureBridge();
+        const t0 = performance.now();
+        const res = await fn(bytes, readOptions());
+        const ms = performance.now() - t0;
+        if (res.error) {
+          setStatus(res.error, true);
+          return;
+        }
+        applyResult(res, fileName, sample, bytes, ms);
+      } catch {
+        setStatus(
+          'Could not load the converter engine. Check your connection and try again.',
+          true,
+        );
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function renderPreview() {
+      if (!previewDirty) return;
+      loadingText.textContent = 'Rendering preview…';
+      const needBusy = mdPreview.innerHTML === '';
+      if (needBusy) setBusy(true);
+      try {
+        const [{ marked }, dompurifyMod] = await Promise.all([
+          import('marked'),
+          import('dompurify'),
+        ]);
+        const DOMPurify = (dompurifyMod.default ?? dompurifyMod) as {
+          sanitize: (html: string, cfg?: object) => string;
+        };
+        let html = await marked.parse(markdown, { gfm: true, async: false }) as string;
+        // Defer image loading: park the src in data-mdsrc so we can swap in blob
+        // URLs after sanitizing (and never fetch the relative path).
+        html = html.replace(/(<img\b[^>]*?)\ssrc=/gi, '$1 data-mdsrc=');
+        mdPreview.innerHTML = DOMPurify.sanitize(html);
+        const map = new Map(images.map((im) => [im.path, im.blobUrl]));
+        mdPreview.querySelectorAll('img').forEach((img) => {
+          const src = img.getAttribute('data-mdsrc') ?? '';
+          const blob =
+            map.get(src) ??
+            images.find((im) => src.endsWith(im.filename))?.blobUrl;
+          img.setAttribute('src', blob ?? src);
+          img.setAttribute('loading', 'lazy');
+          img.removeAttribute('data-mdsrc');
+        });
+        mdPreview.querySelectorAll('a[href^="http"]').forEach((a) => {
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noopener noreferrer');
+        });
+        previewDirty = false;
+      } finally {
+        if (needBusy) setBusy(false);
+      }
+    }
+
+    function switchTab(tab: 'markdown' | 'preview') {
+      currentTab = tab;
+      qa('[data-tab]').forEach((t) =>
+        t.setAttribute(
+          'aria-selected',
+          String((t as HTMLElement).dataset.tab === tab),
+        ),
+      );
+      mdSource.hidden = tab !== 'markdown';
+      mdPreview.hidden = tab !== 'preview';
+      if (tab === 'preview') renderPreview();
+    }
+
+    function flashDone(btn: Element, label: string) {
+      const span = btn.querySelector('span');
+      const prev = span?.textContent ?? '';
+      btn.classList.add('is-done');
+      if (span) span.textContent = label;
+      window.setTimeout(() => {
+        btn.classList.remove('is-done');
+        if (span) span.textContent = prev;
+      }, 1400);
+    }
+
+    function download(blob: Blob, filename: string) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+
+    const baseName = () => name.replace(/\.docx$/i, '') || 'document';
+
+    async function handleFile(file: File) {
+      const ok =
+        /\.docx$/i.test(file.name) ||
+        file.type ===
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      if (!ok) {
+        setStatus('That is not a .docx file. Choose a Word document.', true);
+        return;
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await convertBytes(bytes, file.name, false);
+    }
+
+    function resetOptionsToDefault() {
+      qa('[data-opt="flavor"]').forEach((b) =>
+        b.setAttribute(
+          'aria-pressed',
+          String((b as HTMLElement).dataset.val === 'gfm'),
+        ),
+      );
+      (q<HTMLInputElement>('input[data-opt="extractImages"]')!).checked = true;
+      (q<HTMLInputElement>('input[data-opt="includeFootnotes"]')!).checked = true;
+      qa<HTMLInputElement>(
+        'input[data-opt="metadataMode"], input[data-opt="includeHeadersFooters"], input[data-opt="includeComments"], input[data-opt="includeEndnotes"]',
+      ).forEach((c) => (c.checked = false));
+      qa<HTMLSelectElement>('select[data-opt]').forEach(
+        (s) => (s.selectedIndex = 0),
+      );
+    }
+
+    function resetToSample() {
+      revokeImages();
+      images = [];
+      warnings = [];
+      markdown = SAMPLE_MARKDOWN;
+      name = SAMPLE_FILENAME;
+      isSample = true;
+      currentBytes = null;
+      previewDirty = true;
+      resetOptionsToDefault();
+      renderSource();
+      renderNotes();
+      updateActions();
+      showFile();
+      setStatus('');
+      if (currentTab === 'preview') renderPreview();
+    }
+
+    async function onOptionChange() {
+      const bytes = currentBytes ?? (isSample ? await getSampleBytes() : null);
+      if (!bytes) return;
+      await convertBytes(bytes, name, isSample);
+    }
+
+    // --- wire events ---
+    q('[data-choose]')!.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files?.[0];
+      if (f) handleFile(f);
+      fileInput.value = '';
+    });
+    q('[data-sample]')!.addEventListener('click', resetToSample);
+    clearBtn.addEventListener('click', resetToSample);
+
+    qa('[data-tab]').forEach((t) =>
+      t.addEventListener('click', () =>
+        switchTab((t as HTMLElement).dataset.tab as 'markdown' | 'preview'),
+      ),
+    );
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(markdown);
+        flashDone(copyBtn, 'Copied');
+      } catch {
+        setStatus('Copy failed - select the text manually.', true);
+      }
+    });
+    downloadBtn.addEventListener('click', () =>
+      download(
+        new Blob([markdown], { type: 'text/markdown;charset=utf-8' }),
+        `${baseName()}.md`,
+      ),
+    );
+    zipBtn.addEventListener('click', async () => {
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+      zip.file(`${baseName()}.md`, markdown);
+      const folder = zip.folder('images');
+      for (const im of images) folder!.file(im.filename, im.bytes);
+      download(await zip.generateAsync({ type: 'blob' }), `${baseName()}.zip`);
+    });
+
+    // Flavor segmented control.
+    qa('[data-opt="flavor"]').forEach((b) =>
+      b.addEventListener('click', () => {
+        qa('[data-opt="flavor"]').forEach((o) =>
+          o.setAttribute('aria-pressed', String(o === b)),
+        );
+        onOptionChange();
+      }),
+    );
+    // All other option inputs/selects.
+    qa('input[data-opt], select[data-opt]').forEach((el) =>
+      el.addEventListener('change', onOptionChange),
+    );
+
+    advToggle.addEventListener('click', () => {
+      const open = advToggle.getAttribute('aria-expanded') === 'true';
+      advToggle.setAttribute('aria-expanded', String(!open));
+      adv.hidden = open;
+    });
+
+    // Drag & drop onto the source panel.
+    ['dragenter', 'dragover'].forEach((ev) =>
+      source.addEventListener(ev, (e) => {
+        e.preventDefault();
+        source.classList.add('is-dragover');
+      }),
+    );
+    ['dragleave', 'dragend'].forEach((ev) =>
+      source.addEventListener(ev, (e) => {
+        const de = e as DragEvent;
+        if (ev === 'dragleave' && source.contains(de.relatedTarget as Node)) return;
+        source.classList.remove('is-dragover');
+      }),
+    );
+    source.addEventListener('drop', (e) => {
+      e.preventDefault();
+      source.classList.remove('is-dragover');
+      const f = (e as DragEvent).dataTransfer?.files?.[0];
+      if (f) handleFile(f);
+    });
+  }
+</script>

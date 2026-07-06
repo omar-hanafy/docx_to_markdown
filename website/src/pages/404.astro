@@ -1,0 +1,55 @@
+---
+import Base from '../layouts/Base.astro';
+import Icon from '../components/Icon.astro';
+import { withBase } from '../lib/url';
+---
+
+<Base title="Page not found" description="This page could not be found." noindex>
+  <section class="section notfound">
+    <div class="container">
+      <p class="nf-code">404</p>
+      <h1 class="nf-title">This page wandered off.</h1>
+      <p class="nf-lead">
+        The link may be broken or the page may have moved. The converter,
+        however, is right where you left it.
+      </p>
+      <div class="nf-actions">
+        <a class="btn btn-primary" href={withBase('/')}>
+          Go to the converter <Icon name="arrow-right" size={16} />
+        </a>
+        <a class="btn btn-ghost" href={withBase('/features')}>Browse features</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .notfound {
+    min-height: 60vh;
+    display: grid;
+    align-items: center;
+  }
+  .nf-code {
+    font-family: var(--font-mono);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--violet);
+    letter-spacing: var(--tracking-wide);
+  }
+  .nf-title {
+    font-size: var(--text-2xl);
+    margin-top: 0.6rem;
+  }
+  .nf-lead {
+    margin-top: 1rem;
+    max-width: 46ch;
+    color: var(--muted);
+    font-size: var(--text-md);
+  }
+  .nf-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 1.75rem;
+  }
+</style>

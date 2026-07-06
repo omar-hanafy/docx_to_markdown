@@ -1,0 +1,279 @@
+---
+import { NAV, SITE } from '../consts';
+import { withBase } from '../lib/url';
+import Icon from './Icon.astro';
+import ThemeToggle from './ThemeToggle.astro';
+
+const pathname = Astro.url.pathname.replace(/\/$/, '') || '/';
+const home = withBase('/').replace(/\/$/, '') || '/';
+const isActive = (href: string) => {
+  const target = withBase(href).replace(/\/$/, '') || '/';
+  return href === '/' ? pathname === home : pathname.startsWith(target);
+};
+---
+
+<header class="site-header" data-header>
+  <div class="container header-inner">
+    <a class="wordmark" href={withBase('/')} aria-label={`${SITE.name} - home`}>
+      <span class="wm-docx">docx</span>
+      <span class="wm-arrow" aria-hidden="true">
+        <Icon name="arrow-right" size={15} stroke={2} />
+      </span>
+      <span class="wm-md">md</span>
+    </a>
+
+    <nav class="nav-desktop" aria-label="Primary">
+      {
+        NAV.map((item) => (
+          <a
+            href={withBase(item.href)}
+            class="nav-link"
+            aria-current={isActive(item.href) ? 'page' : undefined}
+          >
+            {item.label}
+          </a>
+        ))
+      }
+    </nav>
+
+    <div class="header-actions">
+      <a
+        class="icon-link"
+        href={SITE.pubDev}
+        target="_blank"
+        rel="noopener"
+        aria-label={`${SITE.packageName} on pub.dev`}
+      >
+        <Icon name="package" size={19} />
+      </a>
+      <a
+        class="icon-link"
+        href={SITE.repo}
+        target="_blank"
+        rel="noopener"
+        aria-label="View on GitHub"
+      >
+        <Icon name="github" size={19} />
+      </a>
+      <ThemeToggle />
+      <button
+        class="nav-burger"
+        type="button"
+        aria-label="Menu"
+        aria-expanded="false"
+        aria-controls="mobile-nav"
+        data-burger
+      >
+        <span></span><span></span>
+      </button>
+    </div>
+  </div>
+
+  <nav class="nav-mobile" id="mobile-nav" aria-label="Primary" data-mobile-nav hidden>
+    {
+      NAV.map((item) => (
+        <a href={withBase(item.href)} class="nav-link-mobile">
+          {item.label}
+        </a>
+      ))
+    }
+    <a
+      href={SITE.pubDev}
+      class="nav-link-mobile"
+      target="_blank"
+      rel="noopener"
+    >
+      pub.dev <Icon name="arrow-up-right" size={15} />
+    </a>
+    <a
+      href={SITE.repo}
+      class="nav-link-mobile"
+      target="_blank"
+      rel="noopener"
+    >
+      GitHub <Icon name="arrow-up-right" size={15} />
+    </a>
+  </nav>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--paper) 82%, transparent);
+    backdrop-filter: saturate(1.4) blur(12px);
+    -webkit-backdrop-filter: saturate(1.4) blur(12px);
+    border-bottom: 1px solid transparent;
+    transition: border-color var(--dur) var(--ease-out),
+      background-color var(--dur) var(--ease-out);
+  }
+
+  .site-header[data-scrolled] {
+    border-bottom-color: var(--line);
+  }
+
+  .header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-5);
+    height: 4.25rem;
+  }
+
+  /* Wordmark encodes the transform: serif 'docx' -> mono 'md'. */
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--ink);
+    font-size: 1.2rem;
+    letter-spacing: -0.01em;
+  }
+  .wordmark:hover {
+    color: var(--ink);
+  }
+  .wm-docx {
+    font-family: var(--font-serif);
+    font-weight: 600;
+  }
+  .wm-arrow {
+    display: inline-flex;
+    color: var(--violet);
+  }
+  .wm-md {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--violet);
+  }
+
+  .nav-desktop {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-left: auto;
+    margin-right: var(--space-2);
+  }
+  .nav-link {
+    padding: 0.45rem 0.8rem;
+    border-radius: var(--radius);
+    color: var(--muted);
+    font-size: 0.95rem;
+    font-weight: 500;
+    transition: color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out);
+  }
+  .nav-link:hover {
+    color: var(--ink);
+    background: var(--surface-2);
+  }
+  .nav-link[aria-current='page'] {
+    color: var(--ink);
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .icon-link {
+    display: inline-grid;
+    place-items: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: var(--radius);
+    color: var(--muted);
+    transition: color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out);
+  }
+  .icon-link:hover {
+    color: var(--ink);
+    background: var(--surface-2);
+  }
+
+  .nav-burger {
+    display: none;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: var(--radius);
+    place-items: center;
+    gap: 4px;
+    color: var(--ink);
+  }
+  .nav-burger span {
+    display: block;
+    width: 18px;
+    height: 1.8px;
+    background: currentColor;
+    border-radius: 2px;
+    transition: transform var(--dur) var(--ease-out),
+      opacity var(--dur) var(--ease-out);
+  }
+  .nav-burger[aria-expanded='true'] span:first-child {
+    transform: translateY(3px) rotate(45deg);
+  }
+  .nav-burger[aria-expanded='true'] span:last-child {
+    transform: translateY(-3px) rotate(-45deg);
+  }
+
+  .nav-mobile {
+    display: none;
+    flex-direction: column;
+    padding: var(--space-2) clamp(1.15rem, 5vw, 2.5rem) var(--space-4);
+    border-bottom: 1px solid var(--line);
+    background: var(--paper);
+  }
+  .nav-link-mobile {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.8rem 0.4rem;
+    color: var(--ink);
+    font-size: 1.05rem;
+    font-weight: 500;
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-link-mobile:last-child {
+    border-bottom: none;
+    color: var(--muted);
+  }
+
+  @media (max-width: 720px) {
+    .nav-desktop {
+      display: none;
+    }
+    .nav-burger {
+      display: inline-grid;
+    }
+    .nav-mobile[data-open] {
+      display: flex;
+    }
+  }
+</style>
+
+<script>
+  // Sticky-header hairline on scroll.
+  const header = document.querySelector('[data-header]');
+  const onScroll = () => {
+    if (!header) return;
+    if (window.scrollY > 8) header.setAttribute('data-scrolled', '');
+    else header.removeAttribute('data-scrolled');
+  };
+  onScroll();
+  window.addEventListener('scroll', onScroll, { passive: true });
+
+  // Mobile menu.
+  const burger = document.querySelector('[data-burger]');
+  const menu = document.querySelector('[data-mobile-nav]');
+  burger?.addEventListener('click', () => {
+    const open = burger.getAttribute('aria-expanded') === 'true';
+    burger.setAttribute('aria-expanded', String(!open));
+    if (open) {
+      menu?.removeAttribute('data-open');
+      menu?.setAttribute('hidden', '');
+    } else {
+      menu?.removeAttribute('hidden');
+      menu?.setAttribute('data-open', '');
+    }
+  });
+</script>

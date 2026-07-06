@@ -1,0 +1,69 @@
+/* Long-form article typography for the guide and about pages. */
+.prose {
+  max-width: var(--measure);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--ink-soft);
+}
+.prose > * + * {
+  margin-top: 1.15rem;
+}
+.prose h2 {
+  font-size: var(--text-lg);
+  margin-top: 2.5rem;
+  padding-top: 0.4rem;
+}
+.prose h3 {
+  font-family: var(--font-body);
+  font-size: 1.12rem;
+  font-weight: 650;
+  letter-spacing: 0;
+  margin-top: 1.75rem;
+}
+.prose p {
+  color: var(--muted);
+}
+.prose strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+.prose a {
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 0.18em;
+}
+.prose a:hover {
+  text-decoration-color: var(--violet);
+}
+.prose ul,
+.prose ol {
+  padding-left: 1.3rem;
+  color: var(--muted);
+}
+.prose li {
+  margin-top: 0.4rem;
+}
+.prose li::marker {
+  color: var(--violet);
+}
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--surface-2);
+  color: var(--rust);
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+}
+.prose blockquote {
+  border-left: 3px solid var(--violet);
+  padding: 0.2rem 0 0.2rem 1.1rem;
+  color: var(--muted);
+  font-style: italic;
+}
+.prose hr {
+  margin: 2.5rem 0;
+}
+.prose .lead {
+  font-size: var(--text-md);
+  color: var(--ink-soft);
+}

@@ -1,0 +1,311 @@
+---
+import Base from '../layouts/Base.astro';
+import PageHero from '../components/PageHero.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Icon from '../components/Icon.astro';
+import { SITE } from '../consts';
+import { breadcrumbSchema } from '../lib/schema';
+
+const site = Astro.site ?? new URL('https://docx-to-markdown.dev');
+
+const basicUsage = `import 'dart:io';
+import 'package:docx_to_markdown/docx_to_markdown.dart';
+
+Future<void> main() async {
+  final bytes = await File('document.docx').readAsBytes();
+
+  // Defaults: GitHub Flavored Markdown, footnotes on, tables auto.
+  final markdown = await DocxConverter(bytes).convert();
+
+  print(markdown);
+}`;
+
+const configUsage = `final config = DocxToMarkdownConfig(
+  flavor: MarkdownFlavor.commonmark,
+  tableMode: TableMode.auto,
+  imageSizeMode: ImageSizeMode.obsidian,      // ![alt](img.png =300x200)
+  metadataMode: MetadataMode.yamlFrontMatter, // prepend YAML front matter
+);
+
+final markdown = await DocxConverter(bytes, config: config).convert();`;
+
+const webUsage = `// On the web there is no filesystem, so route image bytes to a sink.
+final images = <DocxImageAsset>[];
+
+final markdown = await DocxConverter(bytes).convert(
+  imageAssetSink: (asset) {
+    images.add(asset);                 // keep the bytes...
+    return 'images/\${asset.suggestedFilename}'; // ...and reference them here
+  },
+);`;
+
+const hooksUsage = `final hooks = DocxToMarkdownHooks(
+  rewriteImageTarget: (src, [ctx]) => 'https://cdn.example.com/\$src',
+  transformBlock: (block, ctx) => block is TableBlock ? null : block, // drop tables
+  onWarning: (w, ctx) => print('[\${w.code}] \${w.message}'),
+);
+
+final md = await DocxConverter(
+  bytes,
+  config: DocxToMarkdownConfig(hooks: hooks),
+).convert();`;
+
+const platforms = ['Server & CLI', 'Flutter Android', 'Flutter iOS', 'macOS', 'Windows', 'Linux', 'Web / browser'];
+---
+
+<Base
+  title="Developers - the docx_to_markdown Dart package"
+  description="Add DOCX to Markdown conversion to any Dart or Flutter app. Pure Dart, zero native dependencies, IR-based for Pandoc-level fidelity, with configurable output and extension hooks."
+  path="/developers"
+  jsonLd={[breadcrumbSchema(site, [
+    { name: 'Home', path: '/' },
+    { name: 'For developers', path: '/developers' },
+  ])]}
+>
+  <PageHero
+    eyebrow="For developers"
+    title="Add DOCX → Markdown to your Dart app."
+    lead="This site is a thin shell around docx_to_markdown - the same open-source package you can drop into any Dart or Flutter project. Here is how to use it."
+  />
+
+  <section class="section">
+    <div class="container dev-layout">
+      <article class="dev-main">
+        <h2>Install</h2>
+        <p>Add the package with a single command:</p>
+        <CodeBlock code={'dart pub add docx_to_markdown\n# Flutter:\nflutter pub add docx_to_markdown'} lang="Terminal" />
+
+        <h2>Convert a document</h2>
+        <p>
+          The converter works on bytes, so load the file however you like. It
+          never touches the disk or network unless you ask it to.
+        </p>
+        <CodeBlock code={basicUsage} filename="main.dart" />
+
+        <h2>Tune the output</h2>
+        <p>
+          Pass a <code>DocxToMarkdownConfig</code>. Every option has a sensible
+          default, so override only what you need - flavor, tables, image
+          sizing, metadata, tracked changes and more.
+        </p>
+        <CodeBlock code={configUsage} filename="config.dart" />
+
+        <h2>On the web</h2>
+        <p>
+          There is no filesystem in the browser, so images flow through an
+          <code>imageAssetSink</code> you control - exactly how this website
+          exports them. (It is the same code path running right now.)
+        </p>
+        <CodeBlock code={webUsage} filename="web.dart" />
+
+        <h2>Extend it with hooks</h2>
+        <p>
+          Rewrite links and image targets, transform or drop blocks and inlines,
+          convert equations to LaTeX, or collect warnings - all without forking.
+        </p>
+        <CodeBlock code={hooksUsage} filename="hooks.dart" />
+      </article>
+
+      <aside class="dev-aside">
+        <div class="aside-card">
+          <h2 class="aside-h">Why this package</h2>
+          <ul class="aside-list">
+            <li><Icon name="check" size={15} /> Pure Dart, zero native dependencies</li>
+            <li><Icon name="check" size={15} /> Parses to an IR for Pandoc-level fidelity</li>
+            <li><Icon name="check" size={15} /> Deterministic, tested output</li>
+            <li><Icon name="check" size={15} /> Safe on malformed files</li>
+          </ul>
+        </div>
+
+        <div class="aside-card">
+          <h2 class="aside-h">Runs everywhere Dart runs</h2>
+          <ul class="platforms">
+            {platforms.map((p) => <li>{p}</li>)}
+          </ul>
+        </div>
+
+        <div class="aside-card">
+          <h2 class="aside-h">Links</h2>
+          <a class="aside-link" href={SITE.pubDev} target="_blank" rel="noopener">
+            <Icon name="arrow-up-right" size={15} /> pub.dev/packages/docx_to_markdown
+          </a>
+          <a class="aside-link" href={SITE.pubDevApi} target="_blank" rel="noopener">
+            <Icon name="arrow-up-right" size={15} /> API reference
+          </a>
+          <a class="aside-link" href={SITE.repo} target="_blank" rel="noopener">
+            <Icon name="github" size={15} /> Source on GitHub
+          </a>
+        </div>
+
+        <div class="aside-card support-card">
+          <h2 class="aside-h">Support</h2>
+          <p class="support-copy">
+            The package is free and MIT-licensed. If it saved you some time, you
+            can fuel the next release.
+          </p>
+          <a
+            class="support-btn"
+            href={SITE.buyMeACoffee}
+            target="_blank"
+            rel="noopener"
+          >
+            <Icon name="coffee" size={16} /> Buy me a coffee
+          </a>
+        </div>
+      </aside>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .dev-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 18rem;
+    gap: clamp(2rem, 5vw, 3.5rem);
+    align-items: start;
+  }
+  .dev-main :global(h2) {
+    font-size: var(--text-lg);
+    margin-top: 2.5rem;
+  }
+  .dev-main :global(h2:first-child) {
+    margin-top: 0;
+  }
+  .dev-main :global(p) {
+    margin-top: 0.7rem;
+    margin-bottom: 1rem;
+    color: var(--muted);
+    max-width: 60ch;
+  }
+  .dev-main :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    background: var(--surface-2);
+    color: var(--rust);
+    padding: 0.1em 0.35em;
+    border-radius: 5px;
+  }
+
+  .dev-aside {
+    position: sticky;
+    top: 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+  }
+  .aside-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    padding: 1.25rem;
+    background: var(--surface);
+    min-width: 0;
+  }
+  .aside-h {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--faint);
+    margin-bottom: 0.8rem;
+  }
+  .aside-list {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .aside-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    line-height: 1.4;
+  }
+  .aside-list svg {
+    color: var(--violet);
+    flex: none;
+    margin-top: 0.15rem;
+  }
+  .platforms {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    list-style: none;
+    padding: 0;
+  }
+  .platforms li {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0.25rem 0.55rem;
+    border-radius: var(--radius-pill);
+    background: var(--surface-2);
+    color: var(--muted);
+    border: 1px solid var(--line);
+  }
+  .aside-link {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .aside-link:hover {
+    color: var(--violet);
+  }
+  .aside-link svg {
+    flex: none;
+    color: var(--faint);
+  }
+  .aside-link:hover svg {
+    color: var(--violet);
+  }
+
+  .support-copy {
+    font-size: 0.9rem;
+    color: var(--muted);
+    line-height: 1.5;
+    margin-bottom: 1rem;
+  }
+  .support-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 1rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.92rem;
+    font-weight: 500;
+    color: #43370a;
+    background: #ffdd00;
+    border: 1px solid #f0cc00;
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .support-btn svg {
+    color: #43370a;
+  }
+  .support-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(217, 164, 0, 0.32);
+  }
+
+  @media (max-width: 900px) {
+    .dev-layout {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .dev-aside {
+      position: static;
+      flex-direction: row;
+      flex-wrap: wrap;
+    }
+    .aside-card {
+      flex: 1 1 14rem;
+    }
+  }
+</style>

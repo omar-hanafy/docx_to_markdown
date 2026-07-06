@@ -1,0 +1,118 @@
+---
+import { SITE } from '../../consts';
+import { withBase } from '../../lib/url';
+import Icon from '../Icon.astro';
+import CodeBlock from '../CodeBlock.astro';
+
+const usage = `import 'package:docx_to_markdown/docx_to_markdown.dart';
+
+final bytes = await File('report.docx').readAsBytes();
+
+// Defaults: GitHub Flavored Markdown, footnotes on, tables auto.
+final markdown = await DocxConverter(bytes).convert();`;
+---
+
+<section class="section dev" id="developers">
+  <div class="container dev-grid">
+    <div class="dev-copy">
+      <p class="eyebrow">For developers</p>
+      <h2 class="sec-title">This whole tool is one Dart package.</h2>
+      <p class="dev-lead">
+        The converter you just used is
+        <a href={SITE.pubDev} target="_blank" rel="noopener">{SITE.packageName}</a>,
+        an open-source, pure-Dart library with zero native dependencies. It runs
+        everywhere Dart runs - server, CLI, Flutter on mobile and desktop, and in
+        the browser. Add it to your project and get the exact conversion you see
+        here.
+      </p>
+      <ul class="dev-points">
+        <li><Icon name="check" size={16} /> Pure Dart, no native bindings</li>
+        <li><Icon name="check" size={16} /> IR-based for Pandoc-level fidelity</li>
+        <li><Icon name="check" size={16} /> Configurable output + extension hooks</li>
+      </ul>
+      <div class="dev-actions">
+        <a class="btn btn-primary" href={withBase('/developers')}>
+          Developer guide <Icon name="arrow-right" size={16} />
+        </a>
+        <a class="btn btn-ghost" href={SITE.pubDev} target="_blank" rel="noopener">
+          <Icon name="arrow-up-right" size={15} /> pub.dev
+        </a>
+        <a class="btn btn-ghost" href={SITE.repo} target="_blank" rel="noopener">
+          <Icon name="github" size={15} /> GitHub
+        </a>
+      </div>
+    </div>
+
+    <div class="dev-code">
+      <CodeBlock code={'dart pub add docx_to_markdown'} lang="Terminal" />
+      <CodeBlock code={usage} filename="main.dart" />
+    </div>
+  </div>
+</section>
+
+<style>
+  .dev {
+    background: var(--surface-2);
+    border-block: 1px solid var(--line);
+  }
+  .dev-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: clamp(2rem, 5vw, 4rem);
+    align-items: center;
+  }
+  .dev-copy,
+  .dev-code {
+    min-width: 0;
+  }
+  .sec-title {
+    font-size: var(--text-2xl);
+    margin-top: 0.7rem;
+  }
+  .dev-lead {
+    margin-top: 1rem;
+    color: var(--muted);
+    font-size: var(--text-md);
+    max-width: 52ch;
+  }
+  .dev-lead a {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+  .dev-points {
+    list-style: none;
+    padding: 0;
+    margin-top: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .dev-points li {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: var(--ink-soft);
+    font-size: 0.95rem;
+  }
+  .dev-points svg {
+    color: var(--violet);
+    flex: none;
+  }
+  .dev-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 1.75rem;
+  }
+  .dev-code {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+  }
+
+  @media (max-width: 820px) {
+    .dev-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

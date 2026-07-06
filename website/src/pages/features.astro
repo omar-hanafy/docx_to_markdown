@@ -1,0 +1,266 @@
+---
+import Base from '../layouts/Base.astro';
+import PageHero from '../components/PageHero.astro';
+import Icon from '../components/Icon.astro';
+import { CAPABILITIES } from '../data/features';
+import { SITE } from '../consts';
+import { breadcrumbSchema } from '../lib/schema';
+import { withBase } from '../lib/url';
+
+const site = Astro.site ?? new URL('https://docx-to-markdown.dev');
+
+const supported = [
+  ['Paragraphs & headings', '# Heading', 'From outline levels, style names, or overrides'],
+  ['Ordered / nested lists', '1. · - item', 'Deep nesting, mixed, and task lists'],
+  ['Task lists', '- [ ] / - [x]', 'GFM checkboxes'],
+  ['Tables', '| col | / <table>', 'Pipes for simple, HTML for merged cells'],
+  ['Images', '![alt](src)', 'Extracted in-browser, optional sizing'],
+  ['Links & bookmarks', '[text](url)', 'Web links and internal anchors'],
+  ['Bold / italic / strike', '**b** *i* ~~s~~', 'Plus sub/superscript'],
+  ['Underline', '<u> or ++text++', 'Configurable'],
+  ['Highlight / color', '<mark> / <span>', 'Opt-in'],
+  ['Inline / block code', '`code` / fenced', 'By font, shading, or style'],
+  ['Blockquotes', '> text', 'From quote styles'],
+  ['Footnotes / endnotes', '[^1]: ...', 'GFM syntax'],
+  ['Definition lists', '<dl> / Pandoc / flat', 'Configurable'],
+  ['Math (OMML)', 'text or LaTeX', 'Text fallback, or LaTeX via hook'],
+  ['Metadata', 'YAML front matter', 'Opt-in'],
+];
+
+const outputOptions = [
+  {
+    title: 'Two Markdown flavors',
+    body: 'GitHub Flavored Markdown for tables, task lists and footnotes - or strict CommonMark for maximum portability.',
+  },
+  {
+    title: 'Tune the conventions',
+    body: 'Switch how tables, underline, image sizing (Obsidian / Pandoc), definition lists and ordered-list markers are rendered.',
+  },
+  {
+    title: 'Tracked changes & metadata',
+    body: 'Accept or reject revisions, show deletions as strikethrough, and optionally prepend document properties as YAML front matter.',
+  },
+  {
+    title: 'Honest about limits',
+    body: 'SmartArt, charts and page geometry cannot become Markdown - their text is kept and a note explains what was downgraded, never a silent crash.',
+  },
+];
+---
+
+<Base
+  title="Features - what the DOCX to Markdown converter handles"
+  description="Every Word element the converter preserves: headings, nested lists, tables, images, footnotes, math, definition lists, formatting and metadata - in GitHub Flavored or CommonMark Markdown."
+  path="/features"
+  jsonLd={[breadcrumbSchema(site, [
+    { name: 'Home', path: '/' },
+    { name: 'Features', path: '/features' },
+  ])]}
+>
+  <PageHero
+    eyebrow="Features"
+    title="Everything it converts, faithfully."
+    lead="The converter reads your document into a structured model before rendering, so complex structure makes it across intact. Here is the full picture."
+  />
+
+  <section class="section">
+    <div class="container">
+      <ul class="cap-grid">
+        {
+          CAPABILITIES.map((c) => (
+            <li class="cap-card">
+              <span class="cap-icon"><Icon name={c.icon} size={19} /></span>
+              <h2 class="cap-title">{c.title}</h2>
+              <p class="cap-desc">{c.desc}</p>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <section class="section band">
+    <div class="container">
+      <h2 class="sec-title">One input, tuned output.</h2>
+      <div class="opt-cards">
+        {
+          outputOptions.map((o) => (
+            <div class="opt-card">
+              <h3>{o.title}</h3>
+              <p>{o.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <h2 class="sec-title">Supported elements</h2>
+      <p class="sec-note">Word element, the Markdown it becomes, and the notable details.</p>
+      <div class="table-wrap">
+        <table class="sup-table">
+          <thead>
+            <tr><th>Word element</th><th>Markdown output</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            {
+              supported.map(([el, md, note]) => (
+                <tr>
+                  <td>{el}</td>
+                  <td><code>{md}</code></td>
+                  <td>{note}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section cta-band">
+    <div class="container cta-inner">
+      <div>
+        <h2 class="sec-title">See it on your own document.</h2>
+        <p class="sec-note">Nothing uploads. It converts the moment you drop a file.</p>
+      </div>
+      <div class="cta-actions">
+        <a class="btn btn-primary" href={withBase('/')}>Open the converter <Icon name="arrow-right" size={16} /></a>
+        <a class="btn btn-ghost" href={withBase('/developers')}>For developers</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .cap-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 17.5rem), 1fr));
+    gap: 1px;
+    list-style: none;
+    padding: 0;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .cap-card {
+    background: var(--surface);
+    padding: 1.5rem;
+  }
+  .cap-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: var(--radius);
+    background: var(--violet-wash);
+    color: var(--violet);
+    margin-bottom: 0.9rem;
+  }
+  .cap-title {
+    font-family: var(--font-body);
+    font-size: 1.02rem;
+    font-weight: 650;
+    letter-spacing: 0;
+  }
+  .cap-desc {
+    margin-top: 0.4rem;
+    font-size: 0.92rem;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .band {
+    background: var(--surface-2);
+    border-block: 1px solid var(--line);
+  }
+  .sec-title {
+    font-size: var(--text-xl);
+  }
+  .sec-note {
+    margin-top: 0.6rem;
+    color: var(--muted);
+  }
+  .opt-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: 1rem;
+    margin-top: 1.75rem;
+  }
+  .opt-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    padding: 1.4rem;
+  }
+  .opt-card h3 {
+    font-family: var(--font-body);
+    font-size: 1.02rem;
+    font-weight: 650;
+    letter-spacing: 0;
+  }
+  .opt-card p {
+    margin-top: 0.5rem;
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+
+  .table-wrap {
+    margin-top: 1.5rem;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+  }
+  .sup-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+    min-width: 34rem;
+  }
+  .sup-table th,
+  .sup-table td {
+    text-align: left;
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .sup-table th {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--faint);
+    background: var(--surface-2);
+  }
+  .sup-table tr:last-child td {
+    border-bottom: none;
+  }
+  .sup-table td:first-child {
+    color: var(--ink);
+    font-weight: 550;
+  }
+  .sup-table code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    color: var(--rust);
+    white-space: nowrap;
+  }
+
+  .cta-band {
+    border-top: 1px solid var(--line);
+  }
+  .cta-inner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+  }
+  .cta-actions {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+</style>

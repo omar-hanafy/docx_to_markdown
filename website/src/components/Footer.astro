@@ -1,0 +1,223 @@
+---
+import { SITE } from '../consts';
+import { withBase } from '../lib/url';
+import Icon from './Icon.astro';
+
+const year = 2026;
+---
+
+<footer class="site-footer">
+  <div class="container footer-grid">
+    <div class="footer-brand">
+      <a class="wordmark" href={withBase('/')} aria-label={`${SITE.name} - home`}>
+        <span class="wm-docx">docx</span>
+        <span class="wm-arrow" aria-hidden="true"
+          ><Icon name="arrow-right" size={14} stroke={2} /></span
+        >
+        <span class="wm-md">md</span>
+      </a>
+      <p class="footer-tag">
+        A free, private DOCX to Markdown converter. Runs entirely in your
+        browser - your files are never uploaded.
+      </p>
+      <p class="footer-privacy">
+        <Icon name="lock" size={14} /> No upload · No tracking of file contents
+      </p>
+      <a
+        class="footer-bmc"
+        href={SITE.buyMeACoffee}
+        target="_blank"
+        rel="noopener"
+      >
+        <Icon name="coffee" size={15} /> Buy me a coffee
+      </a>
+    </div>
+
+    <nav class="footer-col" aria-label="Product">
+      <h2 class="footer-h">Product</h2>
+      <a href={withBase('/')}>Convert a file</a>
+      <a href={withBase('/features')}>Features</a>
+      <a href={withBase('/guides/convert-docx-to-markdown')}>How-to guide</a>
+      <a href={withBase('/about')}>About</a>
+    </nav>
+
+    <nav class="footer-col" aria-label="For developers">
+      <h2 class="footer-h">Developers</h2>
+      <a href={withBase('/developers')}>Dart package</a>
+      <a href={SITE.pubDev} target="_blank" rel="noopener"
+        >pub.dev <Icon name="arrow-up-right" size={13} /></a
+      >
+      <a href={SITE.pubDevApi} target="_blank" rel="noopener"
+        >API reference <Icon name="arrow-up-right" size={13} /></a
+      >
+      <a href={SITE.repo} target="_blank" rel="noopener"
+        >Source on GitHub <Icon name="arrow-up-right" size={13} /></a
+      >
+    </nav>
+  </div>
+
+  <div class="container footer-base">
+    <p class="footer-credit">
+      Built by
+      <a href={SITE.authorUrl} target="_blank" rel="noopener">{SITE.author}</a>
+      · Powered by the open-source
+      <a href={SITE.pubDev} target="_blank" rel="noopener"
+        >{SITE.packageName}</a
+      > package
+    </p>
+    <p class="footer-legal">© {year} {SITE.author} · MIT licensed</p>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: var(--space-10);
+    border-top: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr;
+    gap: var(--space-8) var(--space-6);
+    padding-block: var(--space-8) var(--space-6);
+  }
+
+  .footer-brand .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 1.1rem;
+    color: var(--ink);
+  }
+  .wm-docx {
+    font-family: var(--font-serif);
+    font-weight: 600;
+  }
+  .wm-arrow {
+    display: inline-flex;
+    color: var(--violet);
+  }
+  .wm-md {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--violet);
+  }
+
+  .footer-tag {
+    margin-top: var(--space-4);
+    max-width: 34ch;
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+  .footer-privacy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-top: var(--space-4);
+    color: var(--faint);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+  /* Support link. Quiet by default; warms to the recognizable BMC yellow on
+     hover so it reads as a genuine "buy me a coffee" CTA without shouting. */
+  .footer-bmc {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: fit-content;
+    margin-top: var(--space-5);
+    padding: 0.5rem 0.9rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--ink-soft);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    transition:
+      color 0.15s ease,
+      background 0.15s ease,
+      border-color 0.15s ease,
+      transform 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .footer-bmc svg {
+    color: #d9a400;
+  }
+  .footer-bmc:hover {
+    color: #43370a;
+    background: #ffdd00;
+    border-color: #f0cc00;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(217, 164, 0, 0.28);
+  }
+  .footer-bmc:hover svg {
+    color: #43370a;
+  }
+
+  .footer-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .footer-h {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-eyebrow);
+    color: var(--faint);
+    margin-bottom: 0.3rem;
+  }
+  .footer-col a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  .footer-col a:hover {
+    color: var(--ink);
+  }
+
+  .footer-base {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    padding-block: var(--space-5);
+    border-top: 1px solid var(--line);
+  }
+  .footer-credit,
+  .footer-legal {
+    color: var(--muted);
+    font-size: 0.875rem;
+  }
+  .footer-credit a {
+    color: var(--ink);
+    font-weight: 500;
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 0.2em;
+  }
+  .footer-credit a:hover {
+    text-decoration-color: var(--violet);
+    color: var(--violet);
+  }
+  .footer-legal {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--faint);
+  }
+
+  @media (max-width: 720px) {
+    .footer-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+    .footer-brand {
+      grid-column: 1 / -1;
+    }
+  }
+</style>

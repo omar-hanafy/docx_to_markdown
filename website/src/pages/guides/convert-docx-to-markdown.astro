@@ -1,0 +1,222 @@
+---
+import Base from '../../layouts/Base.astro';
+import PageHero from '../../components/PageHero.astro';
+import Icon from '../../components/Icon.astro';
+import { SITE } from '../../consts';
+import { breadcrumbSchema, howToSchema } from '../../lib/schema';
+import { withBase } from '../../lib/url';
+import '../../styles/prose.css';
+
+const site = Astro.site ?? new URL('https://docx-to-markdown.dev');
+
+const steps = [
+  {
+    name: 'Open the converter',
+    text: 'Go to the converter and drag your .docx onto the page, or click "Choose a .docx" to pick it. Everything runs in your browser, so nothing is uploaded.',
+  },
+  {
+    name: 'Pick your Markdown flavor',
+    text: 'Choose GitHub Flavored Markdown for tables and task lists, or CommonMark for maximum portability. Toggle images, footnotes and front matter as needed.',
+  },
+  {
+    name: 'Review the result',
+    text: 'Read the Markdown, or switch to Preview to see it rendered. Any downgraded elements are listed as conversion notes.',
+  },
+  {
+    name: 'Copy or download',
+    text: 'Copy the Markdown to your clipboard, download a .md file, or download a .zip that bundles the Markdown with an images folder.',
+  },
+];
+
+const jsonLd = [
+  breadcrumbSchema(site, [
+    { name: 'Home', path: '/' },
+    { name: 'Guides', path: '/guides/convert-docx-to-markdown' },
+    { name: 'Convert DOCX to Markdown', path: '/guides/convert-docx-to-markdown' },
+  ]),
+  howToSchema(site, {
+    name: 'How to convert a DOCX file to Markdown',
+    description:
+      'Convert a Word .docx document to clean Markdown in your browser - free, private, with tables, images and formatting preserved.',
+    path: '/guides/convert-docx-to-markdown',
+    steps: steps.map((s) => ({ name: s.name, text: s.text })),
+  }),
+];
+---
+
+<Base
+  title="How to convert DOCX to Markdown (2026 guide)"
+  description="A step-by-step guide to converting Word .docx files to Markdown - free and in your browser, with tables, images, lists and footnotes preserved. Plus GFM vs CommonMark, and how to do it in code."
+  path="/guides/convert-docx-to-markdown"
+  jsonLd={jsonLd}
+>
+  <PageHero
+    eyebrow="Guide"
+    title="How to convert DOCX to Markdown"
+    lead="Turn a Word document into clean Markdown in a few seconds - free, private, and with your tables, lists and images intact. Here's the fast way, plus the details that matter."
+  />
+
+  <section class="section">
+    <div class="container guide-layout">
+      <article class="prose">
+        <p class="lead">
+          Markdown is the lingua franca of README files, wikis, static sites and
+          note apps. Word's <code>.docx</code> is where a lot of writing actually
+          starts. This guide shows the quickest way to get from one to the other
+          without losing structure - and how to automate it if you write code.
+        </p>
+
+        <h2 id="fast">The fast way: convert it in your browser</h2>
+        <p>
+          The <a href={withBase('/')}>converter on this site</a> runs entirely on your own
+          machine - there is no upload, no queue, and no account. It's the
+          simplest option for a one-off file, and it's safe for confidential
+          documents because the file never leaves your browser.
+        </p>
+        <ol>
+          {steps.map((s) => (
+            <li><strong>{s.name}.</strong> {s.text}</li>
+          ))}
+        </ol>
+        <p>
+          That's it. For most documents you'll have clean Markdown in a couple of
+          seconds.
+        </p>
+
+        <h2 id="flavors">GitHub Flavored Markdown vs CommonMark</h2>
+        <p>
+          Two dialects cover almost every target. <strong>GitHub Flavored
+          Markdown (GFM)</strong> adds tables, task lists, strikethrough and
+          footnotes - pick it for GitHub, GitLab, most wikis and static-site
+          generators. <strong>CommonMark</strong> is the strict, maximally
+          portable core; it renders tables as HTML so they still display
+          everywhere. If you're unsure, start with GFM.
+        </p>
+
+        <h2 id="preserved">What gets preserved</h2>
+        <p>
+          A good converter keeps the <em>shape</em> of your document, not just its
+          words. This one preserves:
+        </p>
+        <ul>
+          <li>Headings, ordered and nested lists, and task lists</li>
+          <li>Tables - as Markdown pipes, or HTML when cells are merged</li>
+          <li>Images, extracted so you can download them alongside the Markdown</li>
+          <li>Bold, italic, strikethrough, inline code and blockquotes</li>
+          <li>Footnotes, definition lists, and math</li>
+          <li>Document metadata, optionally as a YAML front-matter block</li>
+        </ul>
+        <p>
+          Some things simply have no Markdown equivalent - SmartArt, charts, and
+          page geometry like columns and margins. Rather than fail, the converter
+          keeps their text where it can and tells you what was downgraded.
+        </p>
+
+        <h2 id="tips">Tips for a clean result</h2>
+        <h3>Bring the images with you</h3>
+        <p>
+          If your document has pictures, use <strong>Download .zip</strong>. You'll
+          get a <code>.md</code> file plus an <code>images/</code> folder, with the
+          Markdown already pointing at the right paths.
+        </p>
+        <h3>Keep the title and author</h3>
+        <p>
+          Turn on <strong>Front matter</strong> to prepend the document's
+          properties (title, author, dates) as a YAML block - handy for static
+          site generators like Astro, Hugo and Jekyll.
+        </p>
+        <h3>Old .doc files</h3>
+        <p>
+          Only the modern <code>.docx</code> format is supported. If you have a
+          legacy <code>.doc</code>, open it in Word or Google Docs and save a copy
+          as <code>.docx</code> first.
+        </p>
+
+        <h2 id="code">Converting DOCX to Markdown in code</h2>
+        <p>
+          Doing this in bulk, or inside your own app? The converter is powered by
+          <a href={SITE.pubDev} target="_blank" rel="noopener">docx_to_markdown</a>,
+          an open-source Dart package. Add it to any Dart or Flutter project and
+          you get the same conversion programmatically - on a server, in a CLI, or
+          on the web. The <a href={withBase('/developers')}>developer guide</a> has copy-paste
+          examples.
+        </p>
+
+        <h2 id="pandoc">How does it compare to Pandoc?</h2>
+        <p>
+          <strong>Pandoc</strong> is the powerful, universal document converter -
+          brilliant, but it's a command-line tool you have to install. This site
+          aims for Pandoc-level structural fidelity with zero setup: open a page,
+          drop a file, done. For scripting large batches Pandoc is still a great
+          choice; for a quick, private, no-install conversion, a browser tab is
+          hard to beat.
+        </p>
+
+        <div class="guide-cta">
+          <a class="btn btn-primary" href={withBase('/')}>Convert a document now <Icon name="arrow-right" size={16} /></a>
+        </div>
+      </article>
+
+      <aside class="guide-toc">
+        <p class="toc-h">On this page</p>
+        <nav>
+          <a href="#fast">The fast way</a>
+          <a href="#flavors">GFM vs CommonMark</a>
+          <a href="#preserved">What's preserved</a>
+          <a href="#tips">Tips</a>
+          <a href="#code">In code</a>
+          <a href="#pandoc">vs Pandoc</a>
+        </nav>
+      </aside>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .guide-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 12rem;
+    gap: clamp(2rem, 5vw, 3.5rem);
+    align-items: start;
+  }
+  .guide-cta {
+    margin-top: 2.5rem;
+    padding-top: 1.75rem;
+    border-top: 1px solid var(--line);
+  }
+  .guide-toc {
+    position: sticky;
+    top: 6rem;
+  }
+  .toc-h {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--faint);
+    margin-bottom: 0.7rem;
+  }
+  .guide-toc nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    border-left: 2px solid var(--line);
+    padding-left: 0.9rem;
+  }
+  .guide-toc a {
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .guide-toc a:hover {
+    color: var(--violet);
+  }
+
+  @media (max-width: 900px) {
+    .guide-layout {
+      grid-template-columns: 1fr;
+    }
+    .guide-toc {
+      display: none;
+    }
+  }
+</style>

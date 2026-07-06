@@ -1,0 +1,19 @@
+name: docx_to_markdown_bridge
+description: >-
+  Browser JS bridge that compiles the docx_to_markdown package to JavaScript and
+  exposes a single global convert() function for the converter website. Not
+  published; consumed only by the static site build.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.12.0
+
+# Path dependency on the package at the repo root, so the compiled bridge always
+# reflects the exact current package code (no version drift between demo and lib).
+dependencies:
+  docx_to_markdown:
+    path: ../../
+
+dev_dependencies:
+  lints: ^6.1.0
