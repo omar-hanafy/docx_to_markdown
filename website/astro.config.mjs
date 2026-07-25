@@ -6,9 +6,10 @@ import sitemap from '@astrojs/sitemap';
 // Can be overridden at build time with the SITE_URL env var.
 const site = process.env.SITE_URL ?? 'https://docx-to-markdown.dev';
 
-// Deploy base path. Empty (root) for a custom domain; '/docx-to-markdown' when
-// hosted as a subfolder of omar-hanafy.github.io. Set via the BASE_PATH env var
-// (see `npm run deploy`). All internal links go through withBase() in src/lib/url.ts.
+// Deploy base path. Empty (root) for a custom domain; '/docx_to_markdown' when
+// served as the GitHub Pages project site of the docx_to_markdown repo. Set via
+// the BASE_PATH env var (see .github/workflows/pages.yml). All internal links go
+// through withBase() in src/lib/url.ts.
 const base = process.env.BASE_PATH || undefined;
 
 // https://astro.build/config
