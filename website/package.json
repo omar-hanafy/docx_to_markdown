@@ -10,8 +10,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "build:bridge": "bash scripts/build-bridge.sh",
-    "deploy": "bash scripts/deploy.sh"
+    "build:bridge": "bash scripts/build-bridge.sh"
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.2.1",
