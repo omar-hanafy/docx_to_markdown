@@ -28,7 +28,7 @@ const {
 
 const site = Astro.site ?? new URL('https://docx-to-markdown.dev');
 // withBase folds in the deploy subpath so canonical/OG URLs are correct whether
-// hosted at a domain root or under omar-hanafy.github.io/docx-to-markdown/.
+// hosted at a domain root or under omar-hanafy.github.io/docx_to_markdown/.
 const canonical = new URL(withBase(path), site).href.replace(/\/$/, '') || site.href;
 const imageUrl = new URL(withBase(image), site).href;
 const fullTitle = rawTitle ? title : `${title} · ${SITE.name}`;

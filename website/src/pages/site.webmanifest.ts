@@ -4,7 +4,7 @@ import { SITE } from '../consts';
 
 // Served at /site.webmanifest. Generated (not a static file in public/) so the
 // start_url and icon paths pick up the deploy base - otherwise they'd 404 when
-// the site is hosted under omar-hanafy.github.io/docx-to-markdown/.
+// the site is hosted under omar-hanafy.github.io/docx_to_markdown/.
 export const GET: APIRoute = () => {
   const manifest = {
     name: SITE.name,

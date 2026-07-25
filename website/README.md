@@ -72,7 +72,14 @@ node scripts/make-sample.mjs        # writes public/sample.docx
 node scripts/capture-sample-md.mjs  # writes src/data/sample.ts from the real conversion
 ```
 
-## Deploy (any static host)
+## Deploy
+
+The live site is <https://omar-hanafy.github.io/docx_to_markdown/>. It is built
+and published by `.github/workflows/pages.yml` on every push to `main` that
+touches `website/`; the workflow passes `BASE_PATH=/docx_to_markdown` and
+`SITE_URL=https://omar-hanafy.github.io`. Nothing built is committed.
+
+### Any other static host
 
 Build output is plain static files in `dist/`. Because this lives in a
 subdirectory of the package repo, point your host at **`website/` as the root
