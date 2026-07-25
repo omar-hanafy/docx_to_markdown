@@ -1,16 +1,16 @@
 // Base-aware URL helpers.
 //
 // The site can be deployed either at a domain root (base '/') or under a
-// subpath (e.g. omar-hanafy.github.io/docx-to-markdown/). Astro exposes the
+// subpath (e.g. omar-hanafy.github.io/docx_to_markdown/). Astro exposes the
 // configured base as `import.meta.env.BASE_URL` - '/' at root, or
-// '/docx-to-markdown/' under a subpath. Every internal, root-relative link and
+// '/docx_to_markdown/' under a subpath. Every internal, root-relative link and
 // asset must be prefixed with it or it will 404 under a subpath.
 //
 // Vite statically replaces `import.meta.env.BASE_URL` at build time, so this
 // works in .astro frontmatter, client <script>s, endpoints, and plain modules.
 
 const RAW = import.meta.env.BASE_URL ?? '/';
-/** Base with no trailing slash: '' at root, '/docx-to-markdown' under a subpath. */
+/** Base with no trailing slash: '' at root, '/docx_to_markdown' under a subpath. */
 const BASE = RAW === '/' ? '' : RAW.replace(/\/$/, '');
 
 /**

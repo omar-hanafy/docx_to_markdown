@@ -5,7 +5,7 @@ import { FAQS } from '../data/faq';
 import { withBase } from './url';
 
 // Base-aware absolute URL: folds in the deploy subpath so JSON-LD URLs are
-// correct under omar-hanafy.github.io/docx-to-markdown/ as well as at a root domain.
+// correct under omar-hanafy.github.io/docx_to_markdown/ as well as at a root domain.
 const abs = (site: URL, path = '/') => new URL(withBase(path), site).href;
 
 export function softwareAppSchema(site: URL) {
