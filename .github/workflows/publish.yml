@@ -11,7 +11,6 @@ on:
   push:
     tags:
       - 'docx_to_markdown-v*'
-  workflow_dispatch:
 
 permissions:
   contents: read

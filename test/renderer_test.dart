@@ -922,7 +922,11 @@ World
       ).render(doc);
       expect(markdown.contains(r'\# Heading'), isTrue);
       expect(markdown.contains(r'\> Quote'), isTrue);
-      expect(markdown.contains(r'\1. Item'), isTrue);
+      // CommonMark honours a backslash only before ASCII punctuation, so
+      // `\1.` would render the backslash literally. The delimiter carries the
+      // escape instead.
+      expect(markdown.contains(r'1\. Item'), isTrue);
+      expect(markdown.contains(r'\1. Item'), isFalse);
       expect(markdown.contains(r'\`'), isTrue);
       expect(markdown.contains(r'\---'), isTrue);
     });
@@ -1025,6 +1029,121 @@ World
         config: DocxToMarkdownConfig.defaults,
       ).render(doc);
       expect(markdown.trim(), '[link](<https://example.com/a%20b>)');
+    });
+  });
+
+  group('Emphasis delimiters never touch whitespace', () {
+    // CommonMark decides whether a `*`/`**`/`~~` run can open or close a span
+    // from the characters flanking it. Word keeps the inter-word space inside
+    // the formatted run, so wrapping content verbatim yields `**1.  **`, which
+    // every parser renders as literal asterisks.
+    String render(List<Inline> inlines, [DocxToMarkdownConfig? config]) =>
+        MarkdownRenderer(
+          config: config ?? DocxToMarkdownConfig.defaults,
+        ).render(Document(blocks: [ParagraphBlock(inlines)])).trim();
+
+    test('hoists a trailing space out of strong', () {
+      expect(
+        render([
+          StrongInline([const TextInline('1.  ')]),
+          const TextInline('Enter shared project details.'),
+        ]),
+        '**1.**  Enter shared project details.',
+      );
+    });
+
+    test('hoists a leading space out of emphasis', () {
+      expect(
+        render([
+          const TextInline('Leading'),
+          EmphInline([const TextInline(' emphasised')]),
+          const TextInline(' tail.'),
+        ]),
+        'Leading *emphasised* tail.',
+      );
+    });
+
+    test('hoists a trailing space out of strikethrough', () {
+      expect(
+        render([
+          const TextInline('Struck '),
+          StrikeInline([const TextInline('removed  ')]),
+          const TextInline('kept.'),
+        ]),
+        'Struck ~~removed~~  kept.',
+      );
+    });
+
+    test('hoists whitespace out of plusPlus underline', () {
+      expect(
+        render([
+          UnderlineInline([const TextInline('u ')]),
+          const TextInline('x'),
+        ], DocxToMarkdownConfig(underlineMode: UnderlineMode.plusPlus)),
+        '++u++ x',
+      );
+    });
+
+    test('drops delimiters around whitespace-only content', () {
+      expect(
+        render([
+          const TextInline('a:'),
+          StrongInline([const TextInline('   ')]),
+          const TextInline('b'),
+        ]),
+        'a:   b',
+      );
+    });
+
+    test('drops delimiters around empty content', () {
+      expect(
+        render([
+          const TextInline('a'),
+          StrongInline(const []),
+          const TextInline('b'),
+        ]),
+        'ab',
+      );
+    });
+
+    test('nesting hoists once, outside both delimiter pairs', () {
+      final markdown = render([
+        const TextInline('a'),
+        StrongInline([
+          EmphInline([const TextInline('  x  ')]),
+        ]),
+        const TextInline('b'),
+      ]);
+      expect(markdown, 'a  ***x***  b');
+      expect(markdown, isNot(contains('** *')));
+      expect(markdown, isNot(contains('* **')));
+    });
+
+    test('HTML-tag wrappers keep their whitespace verbatim', () {
+      // <u>, <sup> and <sub> carry no flanking rule, so hoisting there would
+      // change output for no benefit.
+      expect(
+        render([
+          UnderlineInline([const TextInline('u ')]),
+          SupInline([const TextInline('2 ')]),
+          SubInline([const TextInline('3 ')]),
+        ]),
+        '<u>u </u><sup>2 </sup><sub>3 </sub>',
+      );
+    });
+
+    test('a link inherits the fix through its children', () {
+      expect(
+        render([
+          LinkInline(
+            url: '/u',
+            children: [
+              StrongInline([const TextInline('bold  ')]),
+            ],
+          ),
+        ]),
+        '[**bold**  ](/u)',
+      );
     });
   });
 }

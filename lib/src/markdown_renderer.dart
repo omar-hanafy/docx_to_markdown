@@ -149,7 +149,11 @@ class MarkdownRenderer {
         breakAsBr: true,
       ).trimRight();
 
-      w.writeln('$hashes ${_escapeParagraphLineStartIfNeeded(text)}', ctx);
+      // No line-start escaping here: the `#` prefix has already committed the
+      // line to an ATX heading, so nothing that follows can start a competing
+      // block construct. Escaping anyway turned "1. Problem statement" into a
+      // visible `\1.`.
+      w.writeln('$hashes $text', ctx);
       return;
     }
 
@@ -1203,116 +1207,123 @@ class MarkdownRenderer {
       return;
     }
 
-    // Formatting wrappers
-    if (node is StrongInline) {
+    // Formatting wrappers.
+    //
+    // Every delimiter-based span funnels through exactly one emitter, so the
+    // flanking invariant cannot be re-broken by adding another wrapper type:
+    // there is no second path from a wrapper node to `out.write`.
+    final wrapper = _wrapperFor(node);
+    if (wrapper != null) {
       final inner = _renderInlineGroupAsText(
-        node.children,
+        wrapper.children,
         canBreak: false,
         breakAsBr: true,
       );
-      out.write('**$inner**');
+      out.write(wrapper.wrap.apply(inner));
       return;
-    }
-
-    if (node is EmphInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-      out.write('*$inner*');
-      return;
-    }
-
-    if (node is StrikeInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-      out.write('~~$inner~~');
-      return;
-    }
-
-    if (node is UnderlineInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-
-      switch (config.underlineMode) {
-        case UnderlineMode.ignore:
-          out.write(inner);
-          return;
-        case UnderlineMode.plusPlus:
-          out.write('++$inner++');
-          return;
-        case UnderlineMode.html:
-          out.write('<u>$inner</u>');
-          return;
-      }
-    }
-
-    if (node is SupInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-      out.write('<sup>$inner</sup>');
-      return;
-    }
-
-    if (node is SubInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-      out.write('<sub>$inner</sub>');
-      return;
-    }
-
-    if (node is HighlightInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-      switch (config.highlightMode) {
-        case HighlightMode.none:
-          out.write(inner);
-          return;
-        case HighlightMode.mark:
-          out.write('<mark>$inner</mark>');
-          return;
-      }
-    }
-
-    if (node is ColorInline) {
-      final inner = _renderInlineGroupAsText(
-        node.children,
-        canBreak: false,
-        breakAsBr: true,
-      );
-      switch (config.textColorMode) {
-        case TextColorMode.none:
-          out.write(inner);
-          return;
-        case TextColorMode.htmlSpan:
-          final hex = node.color.startsWith('#')
-              ? node.color
-              : '#${node.color}';
-          out.write(
-            '<span style="color:${_escapeHtmlAttr(hex)}">$inner</span>',
-          );
-          return;
-      }
     }
 
     // Defensive fallback
     out.write('');
+  }
+
+  /// Pairs a formatting wrapper's children with the delimiters that surround
+  /// them under the current configuration; `null` for inlines that are not
+  /// formatting wrappers.
+  ///
+  /// The switch is exhaustive over the sealed [Inline] hierarchy on purpose:
+  /// adding an inline type becomes a compile error here, forcing the author to
+  /// declare whether it is delimiter-based before it can be rendered. Children
+  /// and syntax travel together so no caller can obtain a wrapper's children
+  /// without also obtaining the rule for emitting them.
+  ({List<Inline> children, _InlineWrap wrap})? _wrapperFor(Inline node) {
+    switch (node) {
+      case StrongInline():
+        return (
+          children: node.children,
+          wrap: const _InlineWrap('**', '**', whitespaceSensitive: true),
+        );
+      case EmphInline():
+        return (
+          children: node.children,
+          wrap: const _InlineWrap('*', '*', whitespaceSensitive: true),
+        );
+      case StrikeInline():
+        return (
+          children: node.children,
+          wrap: const _InlineWrap('~~', '~~', whitespaceSensitive: true),
+        );
+      case UnderlineInline():
+        return (
+          children: node.children,
+          wrap: switch (config.underlineMode) {
+            UnderlineMode.ignore => const _InlineWrap.none(),
+            UnderlineMode.plusPlus => const _InlineWrap(
+              '++',
+              '++',
+              whitespaceSensitive: true,
+            ),
+            UnderlineMode.html => const _InlineWrap(
+              '<u>',
+              '</u>',
+              whitespaceSensitive: false,
+            ),
+          },
+        );
+      case SupInline():
+        return (
+          children: node.children,
+          wrap: const _InlineWrap(
+            '<sup>',
+            '</sup>',
+            whitespaceSensitive: false,
+          ),
+        );
+      case SubInline():
+        return (
+          children: node.children,
+          wrap: const _InlineWrap(
+            '<sub>',
+            '</sub>',
+            whitespaceSensitive: false,
+          ),
+        );
+      case HighlightInline():
+        return (
+          children: node.children,
+          wrap: switch (config.highlightMode) {
+            HighlightMode.none => const _InlineWrap.none(),
+            HighlightMode.mark => const _InlineWrap(
+              '<mark>',
+              '</mark>',
+              whitespaceSensitive: false,
+            ),
+          },
+        );
+      case ColorInline():
+        if (config.textColorMode == TextColorMode.none) {
+          return (children: node.children, wrap: const _InlineWrap.none());
+        }
+        final hex = node.color.startsWith('#') ? node.color : '#${node.color}';
+        return (
+          children: node.children,
+          wrap: _InlineWrap(
+            '<span style="color:${_escapeHtmlAttr(hex)}">',
+            '</span>',
+            whitespaceSensitive: false,
+          ),
+        );
+      // Not delimiter-wrapped spans; each has its own branch in _emitInline.
+      case TextInline():
+      case SoftBreakInline():
+      case LineBreakInline():
+      case CodeInline():
+      case LinkInline():
+      case ImageInline():
+      case FootnoteRefInline():
+      case HtmlInline():
+        return null;
+    }
   }
 
   // HTML inline renderer (used for HTML tables)
@@ -1697,19 +1708,27 @@ class MarkdownRenderer {
   }
 
   String _escapeParagraphLineStartIfNeeded(String line) {
-    // Prevent accidental block-level constructs when a paragraph line starts with them.
-    // Applies to paragraph lines only (not headings/lists/etc).
+    // Prevent accidental block-level constructs when a paragraph line starts
+    // with them. Applies to paragraph lines only (not headings/lists/etc).
     final s = line;
     if (s.isEmpty) return s;
 
     // Already escaped
     if (s.startsWith(r'\')) return s;
 
+    // An ordered-list marker starts with a digit, and CommonMark only honours
+    // a backslash before ASCII punctuation - `\1.` would render the backslash
+    // literally. Escape the delimiter instead: `1\. text`.
+    final ordered = _orderedListRe.firstMatch(s);
+    if (ordered != null) {
+      final delimiter = s.indexOf(RegExp(r'[.)]'));
+      return '${s.substring(0, delimiter)}\\${s.substring(delimiter)}';
+    }
+
     final triggers = <RegExp>[
       _atxHeadingRe,
       _blockquoteRe,
       _unorderedListRe,
-      _orderedListRe,
       _fencedCodeRe,
       _horizontalRuleRe,
     ];
@@ -1775,6 +1794,54 @@ class _ImageRenderSize {
   final int? heightPx;
 
   bool get hasAny => widthPx != null || heightPx != null;
+}
+
+/// How a formatting wrapper's rendered content is delimited on output.
+///
+/// [whitespaceSensitive] marks CommonMark emphasis-style runs (`*`, `**`, `~~`,
+/// `++`) whose ability to open or close a span depends on the characters that
+/// flank the run. HTML tags carry no such rule and are emitted verbatim.
+class _InlineWrap {
+  const _InlineWrap(this.open, this.close, {required this.whitespaceSensitive});
+
+  /// A wrapper that emits its content unchanged (`UnderlineMode.ignore`,
+  /// `HighlightMode.none`, `TextColorMode.none`).
+  const _InlineWrap.none() : open = '', close = '', whitespaceSensitive = false;
+
+  final String open;
+  final String close;
+  final bool whitespaceSensitive;
+
+  /// Wraps [inner], hoisting leading and trailing whitespace *outside*
+  /// whitespace-sensitive delimiters.
+  ///
+  /// CommonMark decides whether a `*`/`**`/`~~` run may open or close a span
+  /// from the characters flanking it: a run followed by whitespace can never
+  /// open one, and a run preceded by whitespace can never close one. Word keeps
+  /// the space between words inside the formatted run
+  /// (`<w:t xml:space="preserve">1.  </w:t>` with `<w:b/>`), so wrapping the
+  /// content as-is produces `**1.  **`, which every CommonMark and GFM parser
+  /// renders as four literal asterisks. Moving the padding outside yields
+  /// `**1.**  ` - the same characters in the same order - and parses.
+  ///
+  /// Nesting composes: each level re-measures the string its child produced, so
+  /// `Strong(Emph(Text('  x  ')))` renders `  ***x***  `, never `**  *x*  **`.
+  String apply(String inner) {
+    if (!whitespaceSensitive) return '$open$inner$close';
+
+    // Dart's `trim` strips the Unicode White_Space set - a superset of the
+    // characters CommonMark counts as whitespace for flanking, notably
+    // NO-BREAK SPACE (U+00A0), which Word emits constantly.
+    final core = inner.trim();
+
+    // Nothing to emphasise. `**   **` and `****` would surface as literal
+    // asterisks, so drop the delimiters and keep only the spacing.
+    if (core.isEmpty) return inner;
+
+    final lead = inner.substring(0, inner.length - inner.trimLeft().length);
+    final trail = inner.substring(inner.trimRight().length);
+    return '$lead$open$core$close$trail';
+  }
 }
 
 class _LineWriter {

@@ -64,27 +64,39 @@ DocxToMarkdownConfig loadConfig(GoldenCase c) {
 
 /// The result of converting a case in a throwaway image directory.
 class GoldenResult {
-  /// Creates a result holding the produced [markdown] and its [imageDir].
-  GoldenResult(this.markdown, this.imageDir);
+  /// Creates a result holding the produced [markdown], its [imageDir], and
+  /// every warning the conversion emitted.
+  GoldenResult(this.markdown, this.imageDir, this.warnings);
 
   /// The produced Markdown (already normalized).
   final String markdown;
 
   /// The temp directory images were extracted into; the caller deletes it.
   final Directory imageDir;
+
+  /// Warnings raised while converting the case.
+  ///
+  /// Captured because the Markdown comparison cannot see them: a conversion
+  /// that emits thousands of bogus warnings produces byte-identical output,
+  /// so without this the golden suite is blind to the entire diagnostics
+  /// channel.
+  final List<DocWarning> warnings;
 }
 
 /// Converts a case into a per-case temp image directory and returns the
 /// normalized Markdown plus that directory (which the caller must delete).
 Future<GoldenResult> convertCase(GoldenCase c) async {
   final bytes = await File(c.inputPath).readAsBytes();
-  final config = loadConfig(c);
+  final warnings = <DocWarning>[];
+  final config = loadConfig(
+    c,
+  ).copyWith(hooks: DocxToMarkdownHooks(onWarning: (w, _) => warnings.add(w)));
   final imageDir = await Directory.systemTemp.createTemp('golden_${c.name}_');
   final md = await DocxConverter(
     bytes,
     config: config,
   ).convert(imageOutputDirectory: imageDir.path);
-  return GoldenResult(normalize(md), imageDir);
+  return GoldenResult(normalize(md), imageDir, warnings);
 }
 
 /// Normalizes Markdown for stable comparison: CRLF -> LF, strip per-line
@@ -126,6 +138,7 @@ DocxToMarkdownConfig configFromJson(Map<String, dynamic> json) {
   const known = <String>{
     'flavor',
     'tableMode',
+    'preserveEmptyTables',
     'underlineMode',
     'highlightMode',
     'textColorMode',
@@ -172,6 +185,8 @@ DocxToMarkdownConfig configFromJson(Map<String, dynamic> json) {
   return DocxToMarkdownConfig(
     flavor: enumByName(MarkdownFlavor.values, 'flavor', defaults.flavor),
     tableMode: enumByName(TableMode.values, 'tableMode', defaults.tableMode),
+    preserveEmptyTables:
+        json['preserveEmptyTables'] as bool? ?? defaults.preserveEmptyTables,
     underlineMode: enumByName(
       UnderlineMode.values,
       'underlineMode',

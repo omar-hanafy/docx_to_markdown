@@ -53,6 +53,8 @@ import 'package:docx_to_markdown/src/styles.dart';
 export 'src/config.dart';
 export 'src/ir.dart';
 export 'src/media.dart';
+export 'src/monospace.dart'
+    show MonospaceFontMatcher, kDefaultMonospaceFonts, normalizeFontName;
 export 'src/ooxml_package.dart' show DocxPackageException;
 
 /// Parses DOCX bytes and renders Markdown output.
@@ -178,8 +180,7 @@ class DocxConverter {
       }
 
       // 2. Load styles
-      final styles = StyleRegistry();
-      styles.setMonospaceFonts(config.monospaceFonts);
+      final styles = StyleRegistry(monospaceFonts: config.monospaceMatcher);
       styles.load(package.stylesXml);
 
       // Load "Code" style names from config

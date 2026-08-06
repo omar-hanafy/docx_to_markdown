@@ -265,6 +265,41 @@ sealed class DocNode {
 sealed class Block extends DocNode {
   /// Creates a block with optional debug metadata.
   const Block({super.meta});
+
+  /// Whether this block renders to anything a reader or a link can reach.
+  ///
+  /// The question is deliberately inverted from "does this look like text?":
+  /// everything is content unless it is provably nothing. The switch is
+  /// exhaustive over the sealed hierarchy, so a new [Block] subtype is a
+  /// compile error here until someone classifies it - it can never be
+  /// silently treated as empty and dropped.
+  ///
+  /// Config-independent on purpose. A predicate whose answer depends on
+  /// render settings is one you cannot reason about, so [PageBreakBlock] is
+  /// content even though `PageBreakMode.ignore` renders it to nothing.
+  ///
+  /// See also:
+  /// - [ParagraphBlock.isEmpty], which is a *text* predicate: it reads
+  ///   through [InlinePlainText.toPlainText] and so cannot see an anchor, an
+  ///   image with empty alt text, or a footnote reference.
+  bool get hasRenderableContent => switch (this) {
+    ParagraphBlock(:final inlines) => inlines.any(
+      (i) => i.hasRenderableContent,
+    ),
+    HeadingBlock(:final inlines) => inlines.any((i) => i.hasRenderableContent),
+    QuoteBlock(:final blocks) => blocks.any((b) => b.hasRenderableContent),
+    TableBlock(:final grid) => grid.hasRenderableContent,
+    // A bullet, number or checkbox is visible output even with no text.
+    ListBlock(:final items) => items.isNotEmpty,
+    DefinitionListBlock(:final items) => items.isNotEmpty,
+    // An empty fence, rule, break, image, equation or raw HTML all render.
+    CodeBlock() ||
+    HorizontalRuleBlock() ||
+    PageBreakBlock() ||
+    HtmlBlock() ||
+    MathBlock() ||
+    ImageBlock() => true,
+  };
 }
 
 /// An inline IR node (text, link, formatting span, etc.).
@@ -288,6 +323,34 @@ sealed class Block extends DocNode {
 sealed class Inline extends DocNode {
   /// Creates an inline with optional debug metadata.
   const Inline({super.meta});
+
+  /// Whether this inline renders to anything a reader or a link can reach.
+  ///
+  /// Exhaustive over the sealed hierarchy for the same reason as
+  /// [Block.hasRenderableContent]: a new subtype must be classified before it
+  /// can compile, so it defaults to content rather than to nothing.
+  bool get hasRenderableContent => switch (this) {
+    TextInline(:final text) => text.trim().isNotEmpty,
+    // A break with nothing around it is spacing, not content.
+    SoftBreakInline() || LineBreakInline() => false,
+    EmphInline(:final children) ||
+    StrongInline(:final children) ||
+    StrikeInline(:final children) ||
+    UnderlineInline(:final children) ||
+    SupInline(:final children) ||
+    SubInline(:final children) ||
+    HighlightInline(:final children) ||
+    ColorInline(:final children) => children.any((i) => i.hasRenderableContent),
+    // Backticks are visible; a URL is reachable even with blank display text;
+    // an image is content whatever its alt text says; a note reference and a
+    // raw HTML span (comments, inline math, and bookmark anchors all arrive
+    // as HtmlInline) are all real output.
+    CodeInline() ||
+    LinkInline() ||
+    ImageInline() ||
+    FootnoteRefInline() ||
+    HtmlInline() => true,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,6 +1607,10 @@ final class TableGrid extends DocNode {
     return rows.any((r) => r.cells.length != cols);
   }
 
+  /// Whether any cell in the grid carries renderable content.
+  bool get hasRenderableContent =>
+      rows.any((r) => r.cells.any((c) => c.hasRenderableContent));
+
   @override
   List<Object?> get props => <Object?>[rows];
 
@@ -1613,6 +1680,11 @@ final class TableCell extends DocNode {
 
   /// Whether this is a header cell (`<th>` vs `<td>`).
   final bool isHeader;
+
+  /// Whether this cell carries content a reader or a link can reach.
+  ///
+  /// See [Block.hasRenderableContent] for what counts.
+  bool get hasRenderableContent => blocks.any((b) => b.hasRenderableContent);
 
   @override
   List<Object?> get props => <Object?>[colSpan, rowSpan, isHeader, blocks];

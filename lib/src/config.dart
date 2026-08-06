@@ -11,6 +11,7 @@
 // It must not depend on OOXML parsing or rendering implementation details.
 
 import 'package:docx_to_markdown/src/ir.dart';
+import 'package:docx_to_markdown/src/monospace.dart';
 
 /// The Markdown dialect to target for output.
 ///
@@ -689,6 +690,7 @@ class DocxToMarkdownConfig {
     // Output flavor / policies
     this.flavor = MarkdownFlavor.gfm,
     this.tableMode = TableMode.auto,
+    this.preserveEmptyTables = false,
     this.underlineMode = UnderlineMode.html,
     this.highlightMode = HighlightMode.none,
     this.textColorMode = TextColorMode.none,
@@ -721,15 +723,7 @@ class DocxToMarkdownConfig {
 
     // Code detection
     this.codeBlockStyleName = 'Code',
-    List<String> monospaceFonts = const [
-      'consolas',
-      'courier',
-      'menlo',
-      'monaco',
-      'source code pro',
-      'lucida console',
-      'andale mono',
-    ],
+    List<String> monospaceFonts = kDefaultMonospaceFonts,
     this.treatShadedRunsAsCode = true,
 
     // Images
@@ -775,6 +769,29 @@ class DocxToMarkdownConfig {
   /// See [TableMode] for options. Complex tables may lose structure in
   /// Markdown-only mode.
   final TableMode tableMode;
+
+  /// Whether to keep tables whose cells carry no renderable content.
+  /// Defaults to `false`.
+  ///
+  /// A common Word and Google Docs idiom uses a 1x1 shaded table as a
+  /// decorative rule or spacer. Such a table has no text, images, anchors, or
+  /// notes, so by default it produces no output. Set this to `true` to emit it
+  /// anyway - for example to reshape it yourself in
+  /// [DocxToMarkdownHooks.transformBlock].
+  ///
+  /// A cell counts as carrying content if it holds anything a reader or a link
+  /// can reach: text, images, hyperlinks, bookmark anchors, footnote or endnote
+  /// references, comments, math, page breaks, or a non-empty nested table.
+  ///
+  /// The check runs on the parsed source, before
+  /// [DocxToMarkdownHooks.transformBlock]. A hook that empties a table's cells
+  /// still yields an empty table - the invariant is that the *document* carried
+  /// no content, not that the post-hook IR does.
+  ///
+  /// See also:
+  /// - [preserveEmptyParagraphs] - the same policy for paragraphs
+  /// - [Block.hasRenderableContent] - the exact predicate used
+  final bool preserveEmptyTables;
 
   /// How to render underlined text. Defaults to [UnderlineMode.html].
   ///
@@ -918,11 +935,26 @@ class DocxToMarkdownConfig {
   /// code blocks. For more control, use [paragraphStyleOverrides].
   final String codeBlockStyleName;
 
-  /// Font family names (lowercased) that indicate inline code.
+  /// Font family hints that mark a run as inline code.
   ///
-  /// Defaults to common monospace fonts: Consolas, Courier, Menlo, Monaco, etc.
-  /// Runs using these fonts are rendered as inline code (`` `text` ``).
+  /// An entry matches a font when its words appear as a contiguous run of
+  /// whole words in the family name, so `'mono'` matches "SF Mono" and
+  /// "Liberation Mono" but not "Monotype Corsiva". Matching is
+  /// case-insensitive and ignores punctuation and camel-case boundaries.
+  ///
+  /// Defaults to [kDefaultMonospaceFonts]. Replace the list to narrow
+  /// detection, pass `[]` to disable font-based code detection entirely, or
+  /// use `[...kDefaultMonospaceFonts, 'my font']` to extend it. This list
+  /// governs both a direct `w:rFonts` on a run and fonts carried by a style.
   final List<String> monospaceFonts;
+
+  /// The compiled matcher for [monospaceFonts].
+  ///
+  /// Single source of truth for monospace detection at both run level and
+  /// style level.
+  late final MonospaceFontMatcher monospaceMatcher = MonospaceFontMatcher(
+    monospaceFonts,
+  );
 
   /// Whether shaded runs (`w:shd`) are treated as inline code. Defaults to `true`.
   ///
@@ -989,6 +1021,7 @@ class DocxToMarkdownConfig {
   DocxToMarkdownConfig copyWith({
     MarkdownFlavor? flavor,
     TableMode? tableMode,
+    bool? preserveEmptyTables,
     UnderlineMode? underlineMode,
     HighlightMode? highlightMode,
     TextColorMode? textColorMode,
@@ -1023,6 +1056,7 @@ class DocxToMarkdownConfig {
     return DocxToMarkdownConfig(
       flavor: flavor ?? this.flavor,
       tableMode: tableMode ?? this.tableMode,
+      preserveEmptyTables: preserveEmptyTables ?? this.preserveEmptyTables,
       underlineMode: underlineMode ?? this.underlineMode,
       highlightMode: highlightMode ?? this.highlightMode,
       textColorMode: textColorMode ?? this.textColorMode,
@@ -1067,6 +1101,7 @@ class DocxToMarkdownConfig {
     return 'DocxToMarkdownConfig('
         'flavor: $flavor, '
         'tableMode: $tableMode, '
+        'preserveEmptyTables: $preserveEmptyTables, '
         'underlineMode: $underlineMode, '
         'highlightMode: $highlightMode, '
         'textColorMode: $textColorMode, '

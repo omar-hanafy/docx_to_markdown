@@ -11,6 +11,7 @@
 //   - package:xml
 //   - package:collection (for firstOrNull)
 
+import 'package:docx_to_markdown/src/monospace.dart';
 import 'package:xml/xml.dart';
 
 /// Maximum depth when traversing w:basedOn chains.
@@ -137,41 +138,6 @@ class StyleRunProperties {
   /// Whether [highlight] was specified, even when it resolves to none.
   final bool highlightIsSet;
 
-  /// Returns `true` if any of the fonts appear to be monospace.
-  ///
-  /// Uses heuristic matching against common monospace font names.
-  bool get isProbablyMonospace {
-    return _isMonospaceFont(asciiFont) ||
-        _isMonospaceFont(hAnsiFont) ||
-        _isMonospaceFont(csFont);
-  }
-
-  static bool _isMonospaceFont(String? font) {
-    if (font == null) return false;
-    final f = font.trim().toLowerCase();
-
-    // Common monospace fonts across platforms and Word templates.
-    const monospaceHints = <String>[
-      'consolas',
-      'courier',
-      'courier new',
-      'menlo',
-      'monaco',
-      'source code',
-      'fira code',
-      'jetbrains mono',
-      'dejavu sans mono',
-      'ubuntu mono',
-      'lucida console',
-      'inconsolata',
-      'monospace',
-      'mono',
-    ];
-
-    // Exact matches or substring hints.
-    return monospaceHints.any((hint) => f == hint || f.contains(hint));
-  }
-
   /// Returns a copy with [other]'s specified values overriding this instance.
   StyleRunProperties merge(StyleRunProperties other) {
     return StyleRunProperties(
@@ -280,6 +246,16 @@ class StyleAnalysis {
 /// This registry walks style inheritance to infer meaning (heading, code,
 /// quote) without requiring perfect DOCX input.
 class StyleRegistry {
+  /// Creates a registry that decides monospace fonts with [monospaceFonts].
+  ///
+  /// Required, not defaulted: a default would let a caller silently diverge
+  /// from the user's [DocxToMarkdownConfig], which is exactly how the run-level
+  /// and style-level font lists drifted apart.
+  StyleRegistry({required this.monospaceFonts});
+
+  /// The monospace predicate, supplied by [DocxToMarkdownConfig].
+  final MonospaceFontMatcher monospaceFonts;
+
   final Map<String, StyleDefinition> _stylesById = <String, StyleDefinition>{};
   final Map<String, List<String>> _styleIdsByNameNorm =
       <String, List<String>>{};
@@ -291,7 +267,10 @@ class StyleRegistry {
 
   final Set<String> _codeStyleNamesNorm = <String>{};
   final Set<String> _codeStyleIdsNorm = <String>{};
-  List<String> _extraMonospaceHints = <String>[];
+
+  /// Normalized Latin font of the document default, if any.
+  String? _defaultLatinFontNorm;
+  bool _defaultFontIsMonospace = false;
 
   /// Clears all internal state.
   void clear() {
@@ -301,7 +280,8 @@ class StyleRegistry {
     _definitionRoleCache.clear();
     _codeStyleNamesNorm.clear();
     _codeStyleIdsNorm.clear();
-    _extraMonospaceHints = <String>[];
+    _defaultLatinFontNorm = null;
+    _defaultFontIsMonospace = false;
   }
 
   /// Loads style definitions from styles.xml.
@@ -312,8 +292,30 @@ class StyleRegistry {
     _styleIdsByNameNorm.clear();
     _analysisCache.clear();
     _definitionRoleCache.clear();
+    _defaultLatinFontNorm = null;
+    _defaultFontIsMonospace = false;
 
     if (stylesXml == null) return;
+
+    // Document default Latin font: w:docDefaults/w:rPrDefault/w:rPr/w:rFonts,
+    // overridden below by the w:default="1" paragraph style. Read only to
+    // decide whether a monospace font carries contrast - deliberately not an
+    // inheritance source, since that would change bold/italic/color resolution
+    // for every document.
+    XmlElement? docDefaults;
+    for (final e in stylesXml.descendants.whereType<XmlElement>()) {
+      if (e.name.local == 'docDefaults') {
+        docDefaults = e;
+        break;
+      }
+    }
+    final docDefaultRPr = _childLocal(
+      _childLocal(docDefaults, 'rPrDefault'),
+      'rPr',
+    );
+    var defaultFont =
+        _attrLocal(_childLocal(docDefaultRPr, 'rFonts'), 'ascii') ??
+        _attrLocal(_childLocal(docDefaultRPr, 'rFonts'), 'hAnsi');
 
     final styleElements = stylesXml.descendants.whereType<XmlElement>().where(
       (e) => e.name.local == 'style',
@@ -344,6 +346,12 @@ class StyleRegistry {
 
       final runProps = _parseRunProps(_childLocal(styleEl, 'rPr'));
 
+      // The w:default="1" paragraph style is the real body font when present.
+      final isDefaultStyle = _attrLocal(styleEl, 'default') == '1';
+      if (isDefaultStyle && type == StyleType.paragraph) {
+        defaultFont = runProps?.asciiFont ?? runProps?.hAnsiFont ?? defaultFont;
+      }
+
       final def = StyleDefinition(
         id: id,
         type: type,
@@ -364,6 +372,12 @@ class StyleRegistry {
         (_styleIdsByNameNorm[normName] ??= <String>[]).add(id);
       }
     }
+
+    final resolvedDefaultFont = defaultFont;
+    _defaultLatinFontNorm = resolvedDefaultFont == null
+        ? null
+        : normalizeFontName(resolvedDefaultFont);
+    _defaultFontIsMonospace = monospaceFonts.matches(resolvedDefaultFont);
   }
 
   /// Sets the *visible* name of the paragraph style you want treated as a code block style.
@@ -395,16 +409,28 @@ class StyleRegistry {
     _analysisCache.clear();
   }
 
-  /// Sets additional font names to treat as monospace (code indicators).
+  /// Whether [props] carry a monospace font that signals code.
   ///
-  /// These fonts are checked in addition to the built-in monospace font list.
-  /// Font matching is case-insensitive and uses substring matching.
-  void setMonospaceFonts(List<String> fonts) {
-    _extraMonospaceHints = fonts
-        .map((f) => f.trim().toLowerCase())
-        .where((f) => f.isNotEmpty)
-        .toList(growable: false);
-    _analysisCache.clear();
+  /// Only the Latin slots (`w:ascii`, `w:hAnsi`) are consulted. The four
+  /// `w:rFonts` slots are not alternatives - each selects the face used for a
+  /// different Unicode range of the same run - so `w:cs` describes the
+  /// complex-script fallback and `w:eastAsia` the CJK face, neither of which
+  /// says anything about the font the code characters are drawn in. A run like
+  /// `ascii="Calibri" cs="Courier New"` is a Calibri paragraph with an Arabic
+  /// fallback, not code; and `MS Gothic` / `SimSun` are fixed-pitch CJK *body*
+  /// faces that would turn whole documents into inline code.
+  bool hasCodeFont(StyleRunProperties? props) {
+    if (props == null) return false;
+    return _isCodeFont(props.asciiFont) || _isCodeFont(props.hAnsiFont);
+  }
+
+  bool _isCodeFont(String? font) {
+    if (!monospaceFonts.matches(font)) return false;
+    // Contrast guard: in a document whose own body font is monospace, that
+    // font distinguishes nothing. Only a *different* monospace font, or a
+    // non-font signal (shading, a code style), marks code there.
+    if (!_defaultFontIsMonospace) return true;
+    return normalizeFontName(font!) != _defaultLatinFontNorm;
   }
 
   /// Returns the raw style definition, if present.
@@ -600,11 +626,7 @@ class StyleRegistry {
         return true;
       }
 
-      final rp = current.runProps;
-      if (rp != null &&
-          (rp.isProbablyMonospace || _hasExtraMonospaceHint(rp))) {
-        return true;
-      }
+      if (hasCodeFont(current.runProps)) return true;
 
       if (current.basedOn == null) break;
       current = _stylesById[current.basedOn!];
@@ -699,7 +721,7 @@ class StyleRegistry {
     final rp = def.runProps;
     if (rp == null) return false;
 
-    final isMonospace = rp.isProbablyMonospace || _hasExtraMonospaceHint(rp);
+    final isMonospace = hasCodeFont(rp);
     if (isMonospace && rp.hasShading) return true;
 
     // Monospace alone is a weaker signal; keep it conservative.
@@ -851,22 +873,6 @@ class StyleRegistry {
     if (el == null) return false;
     final v = _attrLocal(el, 'val')?.trim().toLowerCase();
     return v != 'nil';
-  }
-
-  bool _hasExtraMonospaceHint(StyleRunProperties rp) {
-    if (_extraMonospaceHints.isEmpty) return false;
-    return _extraMonospaceHints.any((hint) {
-      return _fontContainsHint(rp.asciiFont, hint) ||
-          _fontContainsHint(rp.hAnsiFont, hint) ||
-          _fontContainsHint(rp.csFont, hint);
-    });
-  }
-
-  bool _fontContainsHint(String? font, String hint) {
-    if (font == null) return false;
-    final f = font.trim().toLowerCase();
-    if (f.isEmpty) return false;
-    return f == hint || f.contains(hint);
   }
 
   XmlElement? _childLocal(XmlElement? parent, String local) {

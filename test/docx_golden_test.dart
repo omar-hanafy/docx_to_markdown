@@ -50,6 +50,23 @@ void main() {
           );
         }
 
+        // The Markdown comparison below cannot see the diagnostics channel,
+        // so a conversion that floods `onWarning` with bogus entries still
+        // produces byte-identical output. Assert on it separately: a real
+        // Word document must convert without claiming its own formatting is
+        // unsupported.
+        expect(
+          result.warnings
+              .where((w) => w.code.startsWith('unsupported.'))
+              .map((w) => '${w.code}: ${w.message} @ ${w.location}')
+              .toList(),
+          isEmpty,
+          reason:
+              'Conversion reported unsupported content. Either handle the '
+              'element or, if it is a property/marker element, add it to '
+              'contentlessOoxmlElements.',
+        );
+
         final expectedFile = File(c.expectedPath);
         expect(
           expectedFile.existsSync(),

@@ -129,6 +129,7 @@ final markdown = await DocxConverter(
 |---|---|---|
 | `flavor` | `gfm` | `gfm` or `commonmark`. CommonMark renders tables as HTML. |
 | `tableMode` | `auto` | `auto`, `markdownOnly`, or `htmlOnly`. |
+| `preserveEmptyTables` | `false` | Keep tables whose cells carry no content. Word's 1x1 shaded "decorative rule" is dropped by default. |
 | `definitionListMode` | `html` | `html` (`<dl>`), `pandoc`, or `paragraphs`. |
 | `pageBreakMode` | `ignore` | `ignore`, `thematicBreak` (`---`), or `htmlComment`. |
 | `metadataMode` | `none` | Set to `yamlFrontMatter` to emit front matter. |
@@ -170,7 +171,7 @@ final markdown = await DocxConverter(
 | `strict` | `false` | Throw on structural problems instead of warning. |
 | `emitWarningsAsHtmlComments` | `false` | Inline `<!-- Warning: ... -->` markers. |
 
-> This is the common subset. See the [full API reference](https://pub.dev/documentation/docx_to_markdown/latest/) for every option (code detection via `monospaceFonts` / `codeBlockStyleName` / `treatShadedRunsAsCode`, `bulletMarkers`, `listIndent`, `maxImageWidth`, `preserveEmptyParagraphs`, and more).
+> This is the common subset. See the [full API reference](https://pub.dev/documentation/docx_to_markdown/latest/) for every option (code detection via `monospaceFonts` - whose entries match on whole words, so `'mono'` covers "SF Mono" but not "Monotype Corsiva" - plus `codeBlockStyleName` / `treatShadedRunsAsCode`, `bulletMarkers`, `listIndent`, `maxImageWidth`, `preserveEmptyParagraphs`, and more).
 
 ### Document metadata
 

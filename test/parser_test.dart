@@ -15,8 +15,7 @@ Future<Document> parseDocument(
   final cfg = config ?? DocxToMarkdownConfig.defaults;
   final pkg = DocxPackage.openBytes(bytes);
   try {
-    final styles = StyleRegistry();
-    styles.setMonospaceFonts(cfg.monospaceFonts);
+    final styles = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
     styles.load(pkg.stylesXml);
     if (cfg.codeBlockStyleName.isNotEmpty) {
       styles.addCodeStyleName(cfg.codeBlockStyleName);
@@ -2573,6 +2572,207 @@ void main() {
       final markdown = await DocxConverter(bytes).convert();
 
       expect(markdown.trim(), '*<u>Styled</u>*');
+    });
+  });
+
+  group('A consumed paragraph style contributes no run formatting', () {
+    // A style whose identity became a block marker (`#`, `>`, `<dt>`) has
+    // already spent its typography. Re-emitting its w:rPr as `**` would
+    // double-encode the marker and make it indistinguishable from a real
+    // Ctrl+B.
+    const stylesXml =
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:style w:type="paragraph" w:styleId="Heading3">'
+        '<w:name w:val="heading 3"/>'
+        '<w:pPr><w:outlineLvl w:val="2"/></w:pPr>'
+        '<w:rPr><w:b/><w:i/><w:u w:val="single"/><w:strike/>'
+        '<w:color w:val="FF0000"/><w:highlight w:val="yellow"/>'
+        '<w:vertAlign w:val="superscript"/>'
+        '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr>'
+        '</w:style>'
+        '<w:style w:type="paragraph" w:styleId="Warn">'
+        '<w:name w:val="Warning"/><w:rPr><w:b/></w:rPr></w:style>'
+        '<w:style w:type="character" w:styleId="Strongish">'
+        '<w:name w:val="Strongish"/><w:rPr><w:b/></w:rPr></w:style>'
+        '</w:styles>';
+
+    Future<String> convert(String body, [DocxToMarkdownConfig? config]) async {
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: stylesXml,
+      );
+      final md = await DocxConverter(bytes, config: config).convert();
+      return md.trim();
+    }
+
+    test('every renderable run property is suppressed at once', () async {
+      // The whole class in one case: with all renderer modes enabled, none of
+      // the eight style-supplied properties may reach the output.
+      final markdown = await convert(
+        '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>'
+        '<w:r><w:t>Everything</w:t></w:r></w:p>',
+        DocxToMarkdownConfig(
+          underlineMode: UnderlineMode.html,
+          highlightMode: HighlightMode.mark,
+          textColorMode: TextColorMode.htmlSpan,
+        ),
+      );
+      expect(markdown, '### Everything');
+    });
+
+    test('direct w:b inside a heading survives', () async {
+      expect(
+        await convert(
+          '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>'
+          '<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r></w:p>',
+        ),
+        '### **Bold**',
+      );
+    });
+
+    test('mixed runs keep only the directly bolded one', () async {
+      // The case that rules out unwrapping a fully-bold heading in the
+      // renderer: the two runs are indistinguishable by then.
+      expect(
+        await convert(
+          '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>'
+          '<w:r><w:t xml:space="preserve">Plain </w:t></w:r>'
+          '<w:r><w:rPr><w:b/></w:rPr><w:t>Bolded</w:t></w:r></w:p>',
+        ),
+        '### Plain **Bolded**',
+      );
+    });
+
+    test('a bold character style inside a heading survives', () async {
+      expect(
+        await convert(
+          '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>'
+          '<w:r><w:rPr><w:rStyle w:val="Strongish"/></w:rPr>'
+          '<w:t>Char strong</w:t></w:r></w:p>',
+        ),
+        '### **Char strong**',
+      );
+    });
+
+    test('direct w:b val=0 still wins over a bold heading style', () async {
+      expect(
+        await convert(
+          '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>'
+          '<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>Not bold</w:t></w:r></w:p>',
+        ),
+        '### Not bold',
+      );
+    });
+
+    test('a dropped style still formats its runs', () async {
+      // "Warning" produces a plain paragraph, so its w:rPr is the only
+      // surviving trace of author intent and must be kept.
+      expect(
+        await convert(
+          '<w:p><w:pPr><w:pStyle w:val="Warn"/></w:pPr>'
+          '<w:r><w:t>Careful</w:t></w:r></w:p>',
+        ),
+        '**Careful**',
+      );
+    });
+  });
+
+  group('Content-free tables are dropped at the source', () {
+    Future<String> convert(String body, [DocxToMarkdownConfig? cfg]) async {
+      final md = await DocxConverter(
+        buildDocxBytes(documentXml: docXmlWithBody(body)),
+        config: cfg,
+      ).convert();
+      return md.trim();
+    }
+
+    // Word's and Google Docs' decorative-rule idiom: a 1x1 shaded table whose
+    // only child is an empty paragraph.
+    const decorative =
+        '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'
+        '<w:tblGrid><w:gridCol w:w="9350"/></w:tblGrid>'
+        '<w:tr><w:tc><w:tcPr><w:tcW w:w="9350" w:type="dxa"/>'
+        '<w:shd w:val="clear" w:fill="2563EB"/></w:tcPr>'
+        '<w:p/></w:tc></w:tr></w:tbl>';
+
+    String cellTable(String cellInner) =>
+        '<w:tbl><w:tblGrid><w:gridCol w:w="9350"/></w:tblGrid>'
+        '<w:tr><w:tc><w:tcPr><w:tcW w:w="9350" w:type="dxa"/></w:tcPr>'
+        '$cellInner</w:tc></w:tr></w:tbl>';
+
+    test('a decorative rule produces no output', () async {
+      expect(await convert('$decorative${wP(text: 'After')}'), 'After');
+    });
+
+    test('it is dropped under htmlOnly too', () async {
+      // The branch a renderer-side guard would miss: this used to bypass the
+      // TableBlock path entirely.
+      expect(
+        await convert(
+          '$decorative${wP(text: 'After')}',
+          DocxToMarkdownConfig(tableMode: TableMode.htmlOnly),
+        ),
+        'After',
+      );
+    });
+
+    test('it is dropped under markdownOnly too', () async {
+      expect(
+        await convert(
+          '$decorative${wP(text: 'After')}',
+          DocxToMarkdownConfig(tableMode: TableMode.markdownOnly),
+        ),
+        'After',
+      );
+    });
+
+    test('preserveEmptyTables keeps it', () async {
+      final md = await convert(
+        decorative,
+        DocxToMarkdownConfig(preserveEmptyTables: true),
+      );
+      expect(md, contains('<table>'));
+    });
+
+    test('an empty paragraph in the cell is still empty', () async {
+      // preserveEmptyParagraphs turns the cell into [ParagraphBlock([])]
+      // rather than []; a naive `cell.blocks.isEmpty` check would keep it.
+      expect(
+        await convert(
+          '$decorative${wP(text: 'After')}',
+          DocxToMarkdownConfig(preserveEmptyParagraphs: true),
+        ),
+        'After',
+      );
+    });
+
+    test('a cell holding only a linked bookmark anchor is kept', () async {
+      final body =
+          '${cellTable('<w:p><w:bookmarkStart w:id="1" w:name="target"/>'
+          '<w:bookmarkEnd w:id="1"/></w:p>')}'
+          '<w:p><w:hyperlink w:anchor="target">'
+          '<w:r><w:t>Jump</w:t></w:r></w:hyperlink></w:p>';
+      final md = await convert(body);
+      expect(md, contains('<a id="target">'));
+    });
+
+    test('a cell holding only a footnote reference is kept', () async {
+      final md = await convert(
+        cellTable('<w:p><w:r><w:footnoteReference w:id="2"/></w:r></w:p>'),
+      );
+      expect(md, contains('<table>'));
+    });
+
+    test('emitting a warning makes the drop auditable', () async {
+      final codes = <String>[];
+      await DocxConverter(
+        buildDocxBytes(documentXml: docXmlWithBody(decorative)),
+        config: DocxToMarkdownConfig(
+          hooks: DocxToMarkdownHooks(onWarning: (w, _) => codes.add(w.code)),
+        ),
+      ).convert();
+      expect(codes, contains('table.emptyDropped'));
     });
   });
 }

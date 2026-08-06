@@ -1,3 +1,4 @@
+import 'package:docx_to_markdown/src/monospace.dart';
 import 'package:docx_to_markdown/src/styles.dart';
 import 'package:test/test.dart';
 import 'package:xml/xml.dart';
@@ -39,7 +40,7 @@ void main() {
     }
 
     test('analyzes heading, code, and quote styles', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       reg.load(makeStyles());
 
       final heading = reg.analyzeParagraphStyle('Heading1');
@@ -57,7 +58,7 @@ void main() {
     });
 
     test('resolves numbering via basedOn chain', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       reg.load(makeStyles());
       final numbering = reg.resolveNumberingForStyle('ListChild');
       expect(numbering?.numId, '5');
@@ -65,13 +66,13 @@ void main() {
     });
 
     test('resolves styleId by visible name', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       reg.load(makeStyles());
       expect(reg.resolveStyleIdByName('Heading 1'), 'Heading1');
     });
 
     test('addCodeStyleName marks code style by name', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="CustomCode">
@@ -85,7 +86,7 @@ void main() {
     });
 
     test('addCodeStyleId marks code style by id', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="MyCode"/>
@@ -97,7 +98,7 @@ void main() {
     });
 
     test('cycle in basedOn chain does not loop', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="A">
@@ -114,7 +115,7 @@ void main() {
     });
 
     test('resolveStyleIdByName respects type filter', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="ParaStyle">
@@ -132,7 +133,7 @@ void main() {
     });
 
     test('heading level inferred from styleId', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="Heading3"/>
@@ -144,7 +145,7 @@ void main() {
     });
 
     test('title/subtitle fallback to heading levels', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="Title">
@@ -163,8 +164,11 @@ void main() {
       expect(subtitle.headingLevel, 2);
     });
 
-    test('monospace without shading implies code via heuristics', () {
-      final reg = StyleRegistry();
+    test('a code-hinted style id implies code regardless of font', () {
+      // "MonoOnly" matches the style-name hint list, so this proves the name
+      // heuristic - not font detection. Kept explicit so it is not mistaken
+      // for font coverage again.
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:styleId="MonoOnly">
@@ -172,8 +176,33 @@ void main() {
   </w:style>
 </w:styles>''';
       reg.load(XmlDocument.parse(xml));
-      final analysis = reg.analyzeParagraphStyle('MonoOnly');
-      expect(analysis.isCodeBlock, isTrue);
+      expect(reg.analyzeParagraphStyle('MonoOnly').isCodeBlock, isTrue);
+    });
+
+    test('a monospace paragraph style alone does not imply code', () {
+      // Deliberate: monospace without shading is too weak a signal for a
+      // whole paragraph style. The style id carries no code hint here.
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
+      final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="BodyAlt">
+    <w:rPr><w:rFonts w:ascii="Consolas"/></w:rPr>
+  </w:style>
+</w:styles>''';
+      reg.load(XmlDocument.parse(xml));
+      expect(reg.analyzeParagraphStyle('BodyAlt').isCodeBlock, isFalse);
+    });
+
+    test('monospace plus shading does imply code', () {
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
+      final xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="BodyAlt">
+    <w:rPr><w:rFonts w:ascii="Consolas"/><w:shd w:val="clear" w:fill="EEEEEE"/></w:rPr>
+  </w:style>
+</w:styles>''';
+      reg.load(XmlDocument.parse(xml));
+      expect(reg.analyzeParagraphStyle('BodyAlt').isCodeBlock, isTrue);
     });
   });
 }
