@@ -94,6 +94,7 @@ DocxToMarkdownConfig _buildConfig(
     // Output flavor / policies
     flavor: _enum(_str(o, 'flavor'), _flavors, MarkdownFlavor.gfm),
     tableMode: _enum(_str(o, 'tableMode'), _tableModes, TableMode.auto),
+    preserveEmptyTables: _bool(o, 'preserveEmptyTables') ?? false,
     definitionListMode: _enum(
       _str(o, 'definitionListMode'),
       _definitionListModes,

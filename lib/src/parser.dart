@@ -16,6 +16,7 @@ import 'package:docx_to_markdown/src/config.dart';
 import 'package:docx_to_markdown/src/ir.dart';
 import 'package:docx_to_markdown/src/metadata_parser.dart';
 import 'package:docx_to_markdown/src/ooxml_package.dart';
+import 'package:docx_to_markdown/src/ooxml_vocabulary.dart';
 import 'package:docx_to_markdown/src/styles.dart';
 
 /// Callback type for receiving non-fatal parsing warnings.
@@ -29,6 +30,18 @@ class _ParseContext {
   _ParseContext({required this.partPath});
   final String partPath;
 }
+
+/// Whether a paragraph style's own typography has already been spent.
+///
+/// When a style's identity is translated into a block construct (`#`, `>`, a
+/// fence, a `<dt>`), its `w:rPr` is the presentation of that construct, not
+/// authorial emphasis. Re-emitting it as `**`/`*` double-encodes what the block
+/// marker already says, and makes it indistinguishable from a real Ctrl+B - so
+/// the distinction is destroyed, not merely duplicated.
+///
+/// When the style's identity is dropped (a plain paragraph or list item), its
+/// `w:rPr` is the only surviving trace of author intent and must be kept.
+enum _StyleTypography { consumedByBlock, appliesToRuns }
 
 /// Parses a DOCX package into an intermediate representation (IR) [Document].
 ///
@@ -244,12 +257,8 @@ class DocxParser {
         return _tokenizeParagraph(el, ctx: ctx, loc: loc);
 
       case 'tbl':
-        return [
-          _BlockToken(
-            _parseTable(el, ctx: ctx, loc: loc),
-            loc: loc,
-          ),
-        ];
+        final table = _parseTable(el, ctx: ctx, loc: loc);
+        return table == null ? const [] : [_BlockToken(table, loc: loc)];
 
       case 'sdt':
         // Recursive unwrap
@@ -286,13 +295,13 @@ class DocxParser {
         }
         return const [];
 
-      case 'bookmarkEnd':
-        return const [];
-
-      case 'sectPr':
-        return const [];
-
       default:
+        // Property and marker elements carry no content. The single source of
+        // truth is `contentlessOoxmlElements`; the inline tokenizer reads the
+        // same set at the same position in its own switch. Checking here
+        // rather than before the switch keeps elements that have real
+        // behaviour (w:bookmarkStart, and w:commentRange* inline) working.
+        if (isContentlessOoxmlElement(el.name.local)) return const [];
         return _unknownBlockTokens(el, ctx: ctx, loc: loc);
     }
   }
@@ -378,24 +387,34 @@ class DocxParser {
       ];
     }
 
+    // Hoisted from the definition-list branch below so exactly one expression
+    // decides both the block type and whether the style's typography is spent.
+    final defRole = (numPr == null && !isHeading && !isQuote)
+        ? styles.definitionRole(styleId)
+        : null;
+
+    final typography = (isHeading || isQuote || defRole != null)
+        ? _StyleTypography.consumedByBlock
+        : _StyleTypography.appliesToRuns;
+
     // Definition lists. Paragraphs styled "Definition Term" / "Definition"
     // (Pandoc reference styles) become definition-list tokens that the builder
     // groups. Headings, quotes, code and explicit style overrides take
     // precedence (handled above / guarded here); direct numbering wins so a
     // genuinely numbered paragraph stays a list.
-    if (numPr == null && !isHeading && !isQuote) {
-      final defRole = styles.definitionRole(styleId);
-      if (defRole != null) {
-        final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
-        final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
-        switch (defRole) {
-          case DefinitionRole.term:
-            return [_DefTermToken(inlines, meta: meta, loc: loc)];
-          case DefinitionRole.definition:
-            return [
-              _DefItemToken(ParagraphBlock(inlines, meta: meta), loc: loc),
-            ];
-        }
+    if (defRole != null) {
+      final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
+      final inlines = _parseInlinesFromParagraph(
+        p,
+        ctx: ctx,
+        loc: loc,
+        typography: typography,
+      );
+      switch (defRole) {
+        case DefinitionRole.term:
+          return [_DefTermToken(inlines, meta: meta, loc: loc)];
+        case DefinitionRole.definition:
+          return [_DefItemToken(ParagraphBlock(inlines, meta: meta), loc: loc)];
       }
     }
 
@@ -441,7 +460,12 @@ class DocxParser {
         ilvl: effectiveIlvl,
       );
 
-      final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+      final inlines = _parseInlinesFromParagraph(
+        p,
+        ctx: ctx,
+        loc: loc,
+        typography: typography,
+      );
 
       // Even if paragraph is empty, keep as list item
       return [
@@ -463,7 +487,12 @@ class DocxParser {
     final meta = _paragraphMeta(ctx: ctx, loc: loc, styleId: styleId);
 
     if (isHeading && headingLevel > 0) {
-      final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+      final inlines = _parseInlinesFromParagraph(
+        p,
+        ctx: ctx,
+        loc: loc,
+        typography: typography,
+      );
       if (_isInlineListEffectivelyEmpty(inlines)) return const [];
       return [
         _BlockToken(
@@ -475,7 +504,12 @@ class DocxParser {
     }
 
     if (isQuote) {
-      final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+      final inlines = _parseInlinesFromParagraph(
+        p,
+        ctx: ctx,
+        loc: loc,
+        typography: typography,
+      );
       if (_isInlineListEffectivelyEmpty(inlines)) return const [];
       return [
         _BlockToken(
@@ -486,7 +520,12 @@ class DocxParser {
       ];
     }
 
-    final inlines = _parseInlinesFromParagraph(p, ctx: ctx, loc: loc);
+    final inlines = _parseInlinesFromParagraph(
+      p,
+      ctx: ctx,
+      loc: loc,
+      typography: typography,
+    );
     final isEmpty = _isInlineListEffectivelyEmpty(inlines);
     final canContinueList = (indentLeftTwips ?? 0) > 0 && !isEmpty;
 
@@ -532,6 +571,7 @@ class DocxParser {
     XmlElement p, {
     required _ParseContext ctx,
     required String loc,
+    required _StyleTypography typography,
   }) {
     final pPr = _firstChildByLocal(p, 'pPr');
     final styleId = _attrLocal(_firstChildByLocal(pPr, 'pStyle'), 'val');
@@ -539,7 +579,15 @@ class DocxParser {
       p,
       ctx: ctx,
       loc: loc,
-      inheritedRunProps: styles.resolveRunPropertiesForStyle(styleId),
+      // A paragraph style whose identity became a block marker seeds nothing.
+      // Character styles (w:rStyle) and direct w:rPr still apply: they are
+      // merged on top of this seed in _effectiveRunProperties.
+      inheritedRunProps: switch (typography) {
+        _StyleTypography.consumedByBlock => null,
+        _StyleTypography.appliesToRuns => styles.resolveRunPropertiesForStyle(
+          styleId,
+        ),
+      },
     );
   }
 
@@ -730,24 +778,18 @@ class DocxParser {
         }
         break;
 
-      // Property and marker elements never carry inline content. Skipping them
-      // explicitly prevents a whitespace-formatted <w:pPr> (or similar) from
-      // being treated as an unknown inline, which would otherwise leak its
-      // inter-element whitespace into the paragraph text and emit a spurious
-      // `unsupported.inline` warning.
-      case 'pPr':
-      case 'rPr':
-      case 'sectPr':
-      case 'tblPr':
-      case 'trPr':
-      case 'tcPr':
-      case 'tblGrid':
-      case 'bookmarkEnd':
-      case 'proofErr':
-      case 'lastRenderedPageBreak':
-        break;
-
       default:
+        // Property and marker elements never carry inline content. Skipping
+        // them prevents a whitespace-formatted <w:pPr> (or similar) from
+        // leaking its inter-element whitespace into the paragraph text and
+        // emitting a spurious `unsupported.inline` warning.
+        //
+        // Same invariant and same source of truth as the block tokenizer's
+        // default arm. It sits after every explicit `case` so elements with
+        // real inline behaviour (w:commentRangeStart / w:commentRangeEnd
+        // above) keep it.
+        if (isContentlessOoxmlElement(child.name.local)) break;
+
         // Fallback for unknown containers that might hold text
         if (child.descendants.whereType<XmlElement>().any(
           (e) => e.name.local == 'r',
@@ -1105,11 +1147,9 @@ class DocxParser {
   }
 
   bool _isCodeRun(XmlElement? rPr, {required StyleRunProperties? props}) {
-    if (_fontLooksMonospace(props?.asciiFont) ||
-        _fontLooksMonospace(props?.hAnsiFont) ||
-        _fontLooksMonospace(props?.csFont)) {
-      return true;
-    }
+    // Font knowledge lives entirely in the style registry, which resolves it
+    // through the one MonospaceFontMatcher built from config.monospaceFonts.
+    if (styles.hasCodeFont(props)) return true;
     if (config.treatShadedRunsAsCode && (props?.hasShading ?? false)) {
       return true;
     }
@@ -1119,19 +1159,6 @@ class DocxParser {
     final rStyle = _attrLocal(_firstChildByLocal(rPr, 'rStyle'), 'val');
     if (rStyle != null && styles.isCodeCharacterStyle(rStyle)) {
       return true;
-    }
-    return false;
-  }
-
-  bool _fontLooksMonospace(String? font) {
-    if (font == null) return false;
-    final f = font.trim().toLowerCase();
-    if (f.isEmpty) return false;
-
-    for (final hint in config.monospaceFonts) {
-      final h = hint.trim().toLowerCase();
-      if (h.isEmpty) continue;
-      if (f == h || f.contains(h)) return true;
     }
     return false;
   }
@@ -1323,6 +1350,9 @@ class DocxParser {
           p,
           ctx: ctx,
           loc: '$loc:txbx:p[$i]',
+          // A textbox paragraph is inlined with no block marker of its own,
+          // so nothing has consumed its style's typography.
+          typography: _StyleTypography.appliesToRuns,
         );
         inlines.addAll(pInlines);
 
@@ -1384,98 +1414,100 @@ class DocxParser {
   // Tables
   // ===========================================================================
 
-  /// Parses a table (`<w:tbl>`).
+  /// Parses a table (`<w:tbl>`) into a [TableBlock].
   ///
-  /// Strategy:
-  /// - If complex (merged cells) and [DocxToMarkdownConfig.tableMode] allows,
-  ///   fall back to HTML to preserve structure.
-  /// - Otherwise attempt a best-effort grid parse for Markdown tables.
-  Block _parseTable(
+  /// Merged cells are resolved into [TableCell.colSpan]/[TableCell.rowSpan]
+  /// here, so the IR always describes the real geometry. Choosing between a
+  /// pipe table and an HTML table is the renderer's job
+  /// ([DocxToMarkdownConfig.tableMode]) - the parser never emits markup.
+  ///
+  /// Why: rendering HTML at parse time used to flatten cell content to plain
+  /// text (losing bold, links, and images), emit `<td>` for header cells, and
+  /// hand callers an opaque `HtmlBlock` instead of a navigable table.
+  /// Returns `null` when the table carries nothing a reader can reach.
+  ///
+  /// A 1x1 shaded table with an empty paragraph is Word's and Google Docs'
+  /// idiom for a decorative rule or spacer. Emitting `<table><tr><td></td>` for
+  /// it is pure noise. Dropping happens here rather than in the renderer so it
+  /// applies under every [DocxToMarkdownConfig.tableMode], and so a nested
+  /// empty table has already collapsed before its parent is judged.
+  Block? _parseTable(
     XmlElement tbl, {
     required _ParseContext ctx,
     required String loc,
   }) {
-    final forceHtml = config.tableMode == TableMode.htmlOnly;
-
-    final hasVMerge = tbl.descendants.whereType<XmlElement>().any(
-      (e) => e.name.local == 'vMerge',
-    );
-    final hasGridSpan = tbl.descendants.whereType<XmlElement>().any(
-      (e) => e.name.local == 'gridSpan',
-    );
-
-    final complex = hasVMerge || hasGridSpan;
-
-    if (forceHtml || (config.tableMode == TableMode.auto && complex)) {
-      return HtmlBlock(_renderTableAsHtml(tbl, ctx: ctx, loc: loc));
+    final table = _parseTableGrid(tbl, ctx: ctx, loc: loc);
+    if (table.grid.hasRenderableContent || config.preserveEmptyTables) {
+      return table;
     }
-
-    return _parseTableAsGridBestEffort(tbl, ctx: ctx, loc: loc);
+    _warn(
+      code: 'table.emptyDropped',
+      message:
+          'Dropped a table with no renderable content (decorative or empty). '
+          'Set preserveEmptyTables: true to keep it.',
+      location: loc,
+    );
+    return null;
   }
 
-  String _renderTableAsHtml(
+  TableBlock _parseTableGrid(
     XmlElement tbl, {
     required _ParseContext ctx,
     required String loc,
   }) {
-    final sb = StringBuffer()..writeln('<table>');
-    final rows = tbl.children
+    final trList = tbl.children
         .whereType<XmlElement>()
         .where((e) => e.name.local == 'tr')
         .toList();
 
-    final rowCells = <List<_HtmlTableCellInfo>>[];
-    for (var r = 0; r < rows.length; r++) {
-      final tr = rows[r];
-      final tcs = tr.children
+    // Pass 1: read geometry. Column indices must account for horizontal spans
+    // so vertical merges can be matched up by column, not by cell ordinal.
+    final grid = <List<_TableCellInfo>>[];
+    for (var r = 0; r < trList.length; r++) {
+      final tcs = trList[r].children
           .whereType<XmlElement>()
           .where((e) => e.name.local == 'tc')
           .toList();
 
       var colIndex = 0;
-      final cells = <_HtmlTableCellInfo>[];
-
+      final row = <_TableCellInfo>[];
       for (var c = 0; c < tcs.length; c++) {
         final tc = tcs[c];
         final tcPr = _firstChildByLocal(tc, 'tcPr');
 
-        final gridSpan =
+        final colSpan =
             int.tryParse(
               _attrLocal(_firstChildByLocal(tcPr, 'gridSpan'), 'val') ?? '1',
             ) ??
             1;
 
         final vMergeEl = _firstChildByLocal(tcPr, 'vMerge');
-        final vMergeVal = _attrLocal(vMergeEl, 'val');
         final vMerge = vMergeEl == null
             ? _VMergeType.none
-            : (vMergeVal == 'restart'
+            : (_attrLocal(vMergeEl, 'val') == 'restart'
                   ? _VMergeType.restart
                   : _VMergeType.continueCell);
 
-        cells.add(
-          _HtmlTableCellInfo(
+        row.add(
+          _TableCellInfo(
             tc: tc,
             rowIndex: r,
             cellIndex: c,
             colIndex: colIndex,
-            colSpan: gridSpan,
+            colSpan: colSpan,
             vMerge: vMerge,
           ),
         );
-
-        colIndex += gridSpan;
+        colIndex += colSpan;
       }
-
-      rowCells.add(cells);
+      grid.add(row);
     }
 
-    int? rowSpanForCell(_HtmlTableCellInfo cell) {
-      if (cell.vMerge != _VMergeType.restart) return null;
+    int rowSpanForCell(_TableCellInfo cell) {
+      if (cell.vMerge != _VMergeType.restart) return 1;
       var span = 1;
-      for (var r = cell.rowIndex + 1; r < rowCells.length; r++) {
-        final nextRow = rowCells[r];
-        final next = nextRow.firstWhereOrNull(
+      for (var r = cell.rowIndex + 1; r < grid.length; r++) {
+        final next = grid[r].firstWhereOrNull(
           (c) => c.colIndex == cell.colIndex,
         );
         if (next == null) break;
@@ -1483,71 +1515,42 @@ class DocxParser {
         if (next.colSpan != cell.colSpan) break;
         span++;
       }
-      return span > 1 ? span : null;
+      return span;
     }
 
-    for (var r = 0; r < rowCells.length; r++) {
-      sb.writeln('  <tr>');
-      for (final cell in rowCells[r]) {
-        if (cell.vMerge == _VMergeType.continueCell) continue;
-
-        final attrs = <String>[];
-        if (cell.colSpan > 1) attrs.add('colspan="${cell.colSpan}"');
-        final rowSpan = rowSpanForCell(cell);
-        if (rowSpan != null) attrs.add('rowspan="$rowSpan"');
-
-        final cellBlocks = _parseBlocksFromContainer(
-          cell.tc,
-          ctx: ctx,
-          loc: '$loc:tc[${cell.rowIndex},${cell.cellIndex}]',
-        );
-        final inner = _renderBlocksAsHtml(cellBlocks).trim();
-
-        sb.writeln(
-          '    <td${attrs.isEmpty ? '' : ' ${attrs.join(' ')}'}>$inner</td>',
-        );
-      }
-      sb.writeln('  </tr>');
-    }
-
-    sb.writeln('</table>');
-    return sb.toString();
-  }
-
-  TableBlock _parseTableAsGridBestEffort(
-    XmlElement tbl, {
-    required _ParseContext ctx,
-    required String loc,
-  }) {
+    // Pass 2: build the IR. Vertical-merge continuation cells carry no content
+    // of their own; the originating cell absorbs them via rowSpan.
     final rows = <TableRow>[];
     final alignments = <TableAlign>[];
-    final trList = tbl.children
-        .whereType<XmlElement>()
-        .where((e) => e.name.local == 'tr')
-        .toList();
-
-    for (var r = 0; r < trList.length; r++) {
-      final tr = trList[r];
-      final trPr = _firstChildByLocal(tr, 'trPr');
+    for (var r = 0; r < grid.length; r++) {
+      final trPr = _firstChildByLocal(trList[r], 'trPr');
       final isHeader =
           trPr != null && _firstChildByLocal(trPr, 'tblHeader') != null;
 
       final cells = <TableCell>[];
-      final tcList = tr.children
-          .whereType<XmlElement>()
-          .where((e) => e.name.local == 'tc')
-          .toList();
+      for (final info in grid[r]) {
+        if (info.vMerge == _VMergeType.continueCell) continue;
 
-      for (var c = 0; c < tcList.length; c++) {
-        final tc = tcList[c];
-        final cellBlocks = _parseBlocksFromContainer(
-          tc,
-          ctx: ctx,
-          loc: '$loc:tc[$r,$c]',
+        cells.add(
+          TableCell(
+            blocks: _parseBlocksFromContainer(
+              info.tc,
+              ctx: ctx,
+              loc: '$loc:tc[$r,${info.cellIndex}]',
+            ),
+            colSpan: info.colSpan,
+            rowSpan: rowSpanForCell(info),
+            isHeader: isHeader,
+          ),
         );
-        cells.add(TableCell(blocks: cellBlocks, isHeader: isHeader));
+
+        // Alignments are per column, so a spanning cell claims every column
+        // it covers.
         if (r == 0) {
-          alignments.add(_readTableCellAlignment(tc));
+          final align = _readTableCellAlignment(info.tc);
+          for (var i = 0; i < info.colSpan; i++) {
+            alignments.add(align);
+          }
         }
       }
 
@@ -1756,6 +1759,13 @@ class DocxParser {
     required _ParseContext ctx,
     required String loc,
   }) {
+    assert(
+      !isContentlessOoxmlElement(el.name.local),
+      'Contentless OOXML element <${el.name.qualified}> reached the '
+      'unknown-element fallback at $loc. A container walk is dispatching '
+      'property/marker elements; filter them with isContentlessOoxmlElement() '
+      "in the caller's default arm.",
+    );
     _warn(
       code: 'unsupported.block',
       message: 'Unsupported block element: ${el.name.qualified}',
@@ -1791,6 +1801,13 @@ class DocxParser {
   }
 
   List<Inline> _unknownInline(XmlElement el, {required String loc}) {
+    assert(
+      !isContentlessOoxmlElement(el.name.local),
+      'Contentless OOXML element <${el.name.qualified}> reached the '
+      'unknown-element fallback at $loc. A container walk is dispatching '
+      'property/marker elements; filter them with isContentlessOoxmlElement() '
+      "in the caller's default arm.",
+    );
     _warn(
       code: 'unsupported.inline',
       message: 'Unsupported inline element: ${el.name.qualified}',
@@ -2252,71 +2269,6 @@ class DocxParser {
     }
     flush();
     return out;
-  }
-
-  String _renderBlocksAsHtml(List<Block> blocks) {
-    final sb = StringBuffer();
-    for (final b in blocks) {
-      switch (b) {
-        case ParagraphBlock():
-          sb.write(_escapeHtml(_inlineListToPlainText(b.inlines)));
-          sb.write('<br/>');
-          break;
-        case HeadingBlock():
-          sb.write(
-            '<strong>${_escapeHtml(_inlineListToPlainText(b.inlines))}</strong><br/>',
-          );
-          break;
-        case CodeBlock():
-          sb.write('<pre><code>${_escapeHtml(b.text)}</code></pre>');
-          break;
-        case ListBlock():
-          sb.write(b.ordered ? '<ol>' : '<ul>');
-          for (final it in b.items) {
-            sb.write('<li>${_renderBlocksAsHtml(it.blocks)}</li>');
-          }
-          sb.write(b.ordered ? '</ol>' : '</ul>');
-          break;
-        case QuoteBlock():
-          sb.write('<blockquote>${_renderBlocksAsHtml(b.blocks)}</blockquote>');
-          break;
-        case TableBlock():
-          sb.write('<table>');
-          for (final row in b.grid.rows) {
-            sb.write('<tr>');
-            for (final cell in row.cells) {
-              sb.write('<td>${_renderBlocksAsHtml(cell.blocks)}</td>');
-            }
-            sb.write('</tr>');
-          }
-          sb.write('</table>');
-          break;
-        case HorizontalRuleBlock():
-          sb.write('<hr/>');
-          break;
-        case HtmlBlock():
-          sb.write(b.html);
-          break;
-        case MathBlock():
-          sb.write('<span class="math">${_escapeHtml(b.latexOrText)}</span>');
-          break;
-        case DefinitionListBlock():
-          sb.write('<dl>');
-          for (final it in b.items) {
-            sb.write(
-              '<dt>${_escapeHtml(_inlineListToPlainText(it.term))}</dt>',
-            );
-            if (it.definitions.isNotEmpty) {
-              sb.write('<dd>${_renderBlocksAsHtml(it.definitions)}</dd>');
-            }
-          }
-          sb.write('</dl>');
-          break;
-        default:
-          break;
-      }
-    }
-    return sb.toString();
   }
 
   String _escapeHtml(String s) {
@@ -2905,8 +2857,9 @@ bool _isSlugLetterOrDigit(int rune) {
 
 enum _VMergeType { none, restart, continueCell }
 
-class _HtmlTableCellInfo {
-  _HtmlTableCellInfo({
+/// Geometry of one `<w:tc>` while a table is being resolved into the IR.
+class _TableCellInfo {
+  _TableCellInfo({
     required this.tc,
     required this.rowIndex,
     required this.cellIndex,

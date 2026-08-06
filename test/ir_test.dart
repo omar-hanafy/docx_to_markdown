@@ -225,4 +225,140 @@ void main() {
       expect(complex.isComplex, isTrue);
     });
   });
+
+  group('hasRenderableContent', () {
+    // The predicate is inverted on purpose: everything counts as content
+    // unless it is provably nothing. These cases are the ones a naive
+    // "does it have text?" check gets wrong and silently deletes.
+
+    test('whitespace and breaks alone are not content', () {
+      expect(
+        ParagraphBlock([
+          const TextInline('   '),
+          const SoftBreakInline(),
+          const LineBreakInline(),
+        ]).hasRenderableContent,
+        isFalse,
+      );
+    });
+
+    test('a bookmark anchor is content', () {
+      // Anchors arrive as raw HTML. A text-based check reads them as empty
+      // and would drop the target of every internal link in the document.
+      expect(
+        ParagraphBlock([
+          const HtmlInline('<a id="target"></a>'),
+        ]).hasRenderableContent,
+        isTrue,
+      );
+      expect(
+        const HtmlBlock('<a id="target"></a>').hasRenderableContent,
+        isTrue,
+      );
+    });
+
+    test('an image with empty alt text is content', () {
+      expect(
+        ParagraphBlock([
+          const ImageInline(src: 'a.png', alt: ''),
+        ]).hasRenderableContent,
+        isTrue,
+      );
+    });
+
+    test('a footnote or endnote reference is content', () {
+      expect(
+        ParagraphBlock([const FootnoteRefInline('1')]).hasRenderableContent,
+        isTrue,
+      );
+      expect(
+        ParagraphBlock([
+          const FootnoteRefInline('endnote:1'),
+        ]).hasRenderableContent,
+        isTrue,
+      );
+    });
+
+    test('a link with blank display text is content', () {
+      expect(
+        ParagraphBlock([
+          LinkInline(url: '/u', children: [const TextInline('')]),
+        ]).hasRenderableContent,
+        isTrue,
+      );
+    });
+
+    test('emphasis wrapping nothing is not content', () {
+      expect(
+        ParagraphBlock([
+          StrongInline([const TextInline('  ')]),
+        ]).hasRenderableContent,
+        isFalse,
+      );
+    });
+
+    test('a list item with no blocks still renders its marker', () {
+      expect(
+        ListBlock(
+          ordered: false,
+          items: [ListItem(blocks: const [])],
+        ).hasRenderableContent,
+        isTrue,
+      );
+    });
+
+    test('a page break is content even when the renderer ignores it', () {
+      expect(const PageBreakBlock().hasRenderableContent, isTrue);
+    });
+
+    test('an all-empty table is not content, one filled cell is', () {
+      final empty = TableBlock(
+        grid: TableGrid(
+          rows: [
+            TableRow(cells: [TableCell(blocks: const [])]),
+          ],
+        ),
+      );
+      expect(empty.hasRenderableContent, isFalse);
+
+      final filled = TableBlock(
+        grid: TableGrid(
+          rows: [
+            TableRow(
+              cells: [
+                TableCell(
+                  blocks: [
+                    ParagraphBlock([const TextInline('x')]),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      expect(filled.hasRenderableContent, isTrue);
+    });
+
+    test('nested empty tables collapse', () {
+      final inner = TableBlock(
+        grid: TableGrid(
+          rows: [
+            TableRow(cells: [TableCell(blocks: const [])]),
+          ],
+        ),
+      );
+      final outer = TableBlock(
+        grid: TableGrid(
+          rows: [
+            TableRow(
+              cells: [
+                TableCell(blocks: [inner]),
+              ],
+            ),
+          ],
+        ),
+      );
+      expect(outer.hasRenderableContent, isFalse);
+    });
+  });
 }

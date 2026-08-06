@@ -21,8 +21,7 @@ Future<Document> parseDocument(
   final cfg = config ?? DocxToMarkdownConfig.defaults;
   final pkg = DocxPackage.openBytes(bytes);
   try {
-    final styles = StyleRegistry();
-    styles.setMonospaceFonts(cfg.monospaceFonts);
+    final styles = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
     styles.load(pkg.stylesXml);
     if (cfg.codeBlockStyleName.isNotEmpty) {
       styles.addCodeStyleName(cfg.codeBlockStyleName);
@@ -75,7 +74,7 @@ String definitionStylesXml({
 void main() {
   group('StyleRegistry.definitionRole', () {
     StyleRegistry loaded() {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       reg.load(XmlDocument.parse(definitionStylesXml()));
       return reg;
     }
@@ -94,7 +93,7 @@ void main() {
     });
 
     test('resolves by visible name when the styleId is custom', () {
-      final reg = StyleRegistry();
+      final reg = StyleRegistry(monospaceFonts: MonospaceFontMatcher.defaults);
       reg.load(
         XmlDocument.parse(
           definitionStylesXml(termStyleId: 'MyTerm', defStyleId: 'MyDef'),
