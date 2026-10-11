@@ -384,7 +384,12 @@ String stylesXml({
 Uint8List _buildZip(Map<String, Uint8List> files) {
   final archive = Archive();
   for (final entry in files.entries) {
-    archive.addFile(ArchiveFile(entry.key, entry.value.length, entry.value));
+    // archive 4.4's web streaming deflate encoder leaves the ZIP output in
+    // big-endian order. Stored fixtures keep VM and browser ZIP bytes valid.
+    archive.addFile(
+      ArchiveFile(entry.key, entry.value.length, entry.value)
+        ..compression = CompressionType.none,
+    );
   }
   final encoder = ZipEncoder();
   final bytes = encoder.encode(archive);

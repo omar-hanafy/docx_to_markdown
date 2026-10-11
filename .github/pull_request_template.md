@@ -2,8 +2,14 @@
 
 - What changed:
 
-## Checklist
+## Validation
 
-- [ ] I ran the full local validation checklist (format, fix, analyze, test, dry-run, pana).
-- [ ] If this is a release PR: pubspec.yaml version + CHANGELOG.md updated.
-- [ ] Target branch lane rules respected (main stable, dev prerelease).
+- [ ] Dependency resolution, format check, analysis, and tests pass.
+- [ ] Publish dry-run and Pana pass for package or release changes.
+- [ ] Minimum SDK/dependencies and Chrome conversion tests pass when affected.
+- [ ] Website build and conversion smoke check pass when affected.
+
+## Release
+
+- [ ] Release PRs update the version in pubspec.yaml and the matching CHANGELOG.md entry.
+- [ ] The target lane has the correct version: stable on main, prerelease on dev.

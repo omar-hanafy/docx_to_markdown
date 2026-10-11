@@ -246,9 +246,8 @@ void main() {
       // Anchors arrive as raw HTML. A text-based check reads them as empty
       // and would drop the target of every internal link in the document.
       expect(
-        ParagraphBlock([
-          const HtmlInline('<a id="target"></a>'),
-        ]).hasRenderableContent,
+        ParagraphBlock([const HtmlInline('<a id="target"></a>')])
+            .hasRenderableContent,
         isTrue,
       );
       expect(
@@ -259,9 +258,8 @@ void main() {
 
     test('an image with empty alt text is content', () {
       expect(
-        ParagraphBlock([
-          const ImageInline(src: 'a.png', alt: ''),
-        ]).hasRenderableContent,
+        ParagraphBlock([const ImageInline(src: 'a.png', alt: '')])
+            .hasRenderableContent,
         isTrue,
       );
     });
@@ -272,9 +270,8 @@ void main() {
         isTrue,
       );
       expect(
-        ParagraphBlock([
-          const FootnoteRefInline('endnote:1'),
-        ]).hasRenderableContent,
+        ParagraphBlock([const FootnoteRefInline('endnote:1')])
+            .hasRenderableContent,
         isTrue,
       );
     });

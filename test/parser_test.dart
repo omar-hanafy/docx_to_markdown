@@ -770,9 +770,8 @@ void main() {
         },
       );
 
-      final markdown = await DocxConverter(
-        bytes,
-      ).convert(imageAssetSink: (_) => null);
+      final markdown = await DocxConverter(bytes)
+          .convert(imageAssetSink: (_) => null);
 
       expect(markdown.trim(), 'Before  after');
     });
@@ -837,9 +836,8 @@ void main() {
       );
 
       expect(
-        DocxConverter(
-          bytes,
-        ).convert(imageAssetSink: (_) => throw StateError('upload failed')),
+        DocxConverter(bytes)
+            .convert(imageAssetSink: (_) => throw StateError('upload failed')),
         throwsA(isA<StateError>()),
       );
     });
@@ -1174,29 +1172,26 @@ void main() {
       );
     });
 
-    test(
-      'body-level bookmark between same-level bullets does not split list',
-      () async {
-        final body =
-            '<w:p><w:hyperlink w:anchor="refs">${wR(text: "Jump")}</w:hyperlink></w:p>'
-            '${wP(
-              numId: '1',
-              innerXml: wR(text: 'one'),
-            )}'
-            '${wP(
-              numId: '2',
-              innerXml: wR(text: 'two'),
-            )}'
-            '<w:bookmarkStart w:id="9" w:name="refs"/>'
-            '${wP(
-              numId: '1',
-              innerXml: wR(text: 'three'),
-            )}'
-            '<w:bookmarkEnd w:id="9"/>';
-        final bytes = buildDocxBytes(
-          documentXml: docXmlWithBody(body),
-          numberingXml:
-              '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    test('body-level bookmark between same-level bullets does not split list', () async {
+      final body =
+          '<w:p><w:hyperlink w:anchor="refs">${wR(text: "Jump")}</w:hyperlink></w:p>'
+          '${wP(
+            numId: '1',
+            innerXml: wR(text: 'one'),
+          )}'
+          '${wP(
+            numId: '2',
+            innerXml: wR(text: 'two'),
+          )}'
+          '<w:bookmarkStart w:id="9" w:name="refs"/>'
+          '${wP(
+            numId: '1',
+            innerXml: wR(text: 'three'),
+          )}'
+          '<w:bookmarkEnd w:id="9"/>';
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        numberingXml: '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:abstractNum w:abstractNumId="1">
     <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
@@ -1207,16 +1202,15 @@ void main() {
   <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
   <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
 </w:numbering>''',
-        );
+      );
 
-        final markdown = await DocxConverter(bytes).convert();
+      final markdown = await DocxConverter(bytes).convert();
 
-        expect(
-          markdown.trim(),
-          '[Jump](#refs)\n\n- one\n  two\n- <a id="refs"></a>three',
-        );
-      },
-    );
+      expect(
+        markdown.trim(),
+        '[Jump](#refs)\n\n- one\n  two\n- <a id="refs"></a>three',
+      );
+    });
 
     test('renders footnotes when enabled', () async {
       final body = wP(
@@ -1944,8 +1938,7 @@ void main() {
     test('run formatting respects off values', () async {
       final run = wR(
         innerXml: wT('Text'),
-        rPrXml:
-            '<w:b w:val="0"/><w:i w:val="false"/><w:u w:val="none"/><w:strike w:val="off"/>',
+        rPrXml: '<w:b w:val="0"/><w:i w:val="false"/><w:u w:val="none"/><w:strike w:val="off"/>',
       );
       final body = wP(innerXml: run);
       final bytes = buildDocxBytes(documentXml: docXmlWithBody(body));
@@ -2412,34 +2405,31 @@ void main() {
   <w:style w:type="paragraph" w:styleId="Author"><w:name w:val="Author"/><w:basedOn w:val="Title"/></w:style>
 </w:styles>''';
 
-    test(
-      'Title -> H1 and Subtitle -> H2, but Author (basedOn Title) stays a paragraph',
-      () async {
-        final body =
-            wP(text: 'The Title', styleId: 'Title') +
-            wP(text: 'The Subtitle', styleId: 'Subtitle') +
-            wP(text: 'A. Author', styleId: 'Author');
-        final bytes = buildDocxBytes(
-          documentXml: docXmlWithBody(body),
-          stylesXml: titleStyles,
-        );
-        final doc = await parseDocument(bytes);
-        expect(doc.blocks, hasLength(3));
-        expect(
-          doc.blocks[0],
-          isA<HeadingBlock>().having((h) => h.level, 'level', 1),
-        );
-        expect(
-          doc.blocks[1],
-          isA<HeadingBlock>().having((h) => h.level, 'level', 2),
-        );
-        expect(
-          doc.blocks[2],
-          isA<ParagraphBlock>(),
-          reason: 'Author only inherits Title via basedOn; it is not a heading',
-        );
-      },
-    );
+    test('Title -> H1 and Subtitle -> H2, but Author (basedOn Title) stays a paragraph', () async {
+      final body =
+          wP(text: 'The Title', styleId: 'Title') +
+          wP(text: 'The Subtitle', styleId: 'Subtitle') +
+          wP(text: 'A. Author', styleId: 'Author');
+      final bytes = buildDocxBytes(
+        documentXml: docXmlWithBody(body),
+        stylesXml: titleStyles,
+      );
+      final doc = await parseDocument(bytes);
+      expect(doc.blocks, hasLength(3));
+      expect(
+        doc.blocks[0],
+        isA<HeadingBlock>().having((h) => h.level, 'level', 1),
+      );
+      expect(
+        doc.blocks[1],
+        isA<HeadingBlock>().having((h) => h.level, 'level', 2),
+      );
+      expect(
+        doc.blocks[2],
+        isA<ParagraphBlock>(),
+        reason: 'Author only inherits Title via basedOn; it is not a heading',
+      );
+    });
   });
 
   group('Monospace character style (w:rStyle) becomes inline code', () {
@@ -2474,8 +2464,7 @@ void main() {
             wR(text: 'm', rPrXml: '<w:rStyle w:val="VerbatimChar"/>') +
             wR(
               text: '2',
-              rPrXml:
-                  '<w:rStyle w:val="VerbatimChar"/><w:vertAlign w:val="superscript"/>',
+              rPrXml: '<w:rStyle w:val="VerbatimChar"/><w:vertAlign w:val="superscript"/>',
             ),
       );
       final bytes = buildDocxBytes(

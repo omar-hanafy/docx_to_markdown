@@ -42,7 +42,9 @@ class MarkdownRenderer {
   static final _blockquoteRe = RegExp(r'^>\s');
   static final _unorderedListRe = RegExp(r'^(-|\*|\+)\s');
   static final _orderedListRe = RegExp(r'^\d+[.)]\s');
-  static final _fencedCodeRe = RegExp(r'^```');
+  // A backtick fence cannot have backticks in its info string. Matching only
+  // a genuine opening fence avoids escaping a complete inline code span.
+  static final _fencedCodeRe = RegExp(r'^`{3,}[^`]*$');
   static final _horizontalRuleRe = RegExp(r'^(---|\*\*\*|___)\s*$');
 
   /// Converts the document to a Markdown string using the configured settings.
@@ -73,21 +75,28 @@ class MarkdownRenderer {
 
     _renderBlocks(document.blocks, w, root, separateWithBlankLine: true);
 
-    // Footnotes (GFM extension; many renderers support it even if flavor=commonmark)
-    if (config.includeFootnotes && document.footnotes.isNotEmpty) {
+    // Endnotes share footnote syntax, but each source type is independently
+    // selected. The parser namespaces endnote IDs with the `endnote:` prefix.
+    final keys = document.footnotes.keys
+        .where(
+          (id) => id.startsWith('endnote:')
+              ? config.includeEndnotes
+              : config.includeFootnotes,
+        )
+        .toList();
+    if (keys.isNotEmpty) {
       w.ensureBlankLine(root);
       w.writelnRaw('---');
       w.ensureBlankLine(root);
 
-      final keys = document.footnotes.keys.toList()
-        ..sort((a, b) {
-          final ai = int.tryParse(a);
-          final bi = int.tryParse(b);
-          if (ai != null && bi != null) return ai.compareTo(bi);
-          if (ai != null) return -1;
-          if (bi != null) return 1;
-          return a.compareTo(b);
-        });
+      keys.sort((a, b) {
+        final ai = int.tryParse(a);
+        final bi = int.tryParse(b);
+        if (ai != null && bi != null) return ai.compareTo(bi);
+        if (ai != null) return -1;
+        if (bi != null) return 1;
+        return a.compareTo(b);
+      });
 
       for (final id in keys) {
         _renderFootnoteDefinition(id, document.footnotes[id]!, w);
@@ -265,7 +274,7 @@ class MarkdownRenderer {
   }) {
     // Choose a fence longer than any run of backticks in code.
     final longestRun = _longestRunOf(code, '`');
-    final fenceLen = (longestRun + 1).clamp(3, 99);
+    final fenceLen = longestRun < 3 ? 3 : longestRun + 1;
     final fence = '`' * fenceLen;
 
     final lang = (language ?? '').trim();
@@ -1614,11 +1623,17 @@ class MarkdownRenderer {
     normalized = normalized.replaceAll('\n', ' ');
 
     final longestRun = _longestRunOf(normalized, '`');
-    final fenceLen = (longestRun + 1).clamp(1, 99);
+    final fenceLen = longestRun + 1;
     final fence = '`' * fenceLen;
 
-    // If code starts/ends with space, pad with a space inside fences (CommonMark rule)
-    final needsPadding = normalized.startsWith(' ') || normalized.endsWith(' ');
+    // Separate payload backticks from the delimiters. CommonMark removes one
+    // padding space at each end unless the payload consists only of spaces.
+    final hasNonSpace = normalized.codeUnits.any((unit) => unit != 0x20);
+    final needsPadding =
+        normalized.startsWith('`') ||
+        normalized.endsWith('`') ||
+        (hasNonSpace &&
+            (normalized.startsWith(' ') || normalized.endsWith(' ')));
     final content = needsPadding ? ' $normalized ' : normalized;
 
     return '$fence$content$fence';

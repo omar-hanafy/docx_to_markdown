@@ -7,7 +7,7 @@ publish_to: none
 version: 0.1.0
 
 environment:
-  sdk: ^3.12.0
+  sdk: ^3.13.5
 
 # Path dependency on the package at the repo root, so the compiled bridge always
 # reflects the exact current package code (no version drift between demo and lib).

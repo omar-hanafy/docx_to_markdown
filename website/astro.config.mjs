@@ -16,6 +16,9 @@ const base = process.env.BASE_PATH || undefined;
 export default defineConfig({
   site,
   base,
+  // Keep HTML-aware spacing between inline elements after Astro 7 changed the
+  // default to JSX whitespace rules.
+  compressHTML: true,
   trailingSlash: 'ignore',
   integrations: [sitemap()],
   build: {

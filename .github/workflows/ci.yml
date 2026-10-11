@@ -14,36 +14,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Dart (stable)
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
           sdk: stable
 
       - name: Version channel check
-        if: github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')
+        if: github.base_ref == 'main' || github.base_ref == 'dev' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+        shell: bash
         run: |
           set -euo pipefail
-          base_sha="${{ github.event.pull_request.base.sha }}"
-          head_sha="${{ github.event.pull_request.head.sha }}"
-          if git diff --name-only "$base_sha" "$head_sha" | grep -q '^pubspec.yaml$'; then
-            version=$(awk '/^version:/ {print $2}' pubspec.yaml)
-            if [[ "${{ github.base_ref }}" == "main" ]]; then
-              if [[ "$version" == *-* ]]; then
-                echo "Main requires a stable version (no pre-release suffix)."
-                exit 1
-              fi
-            else
-              if [[ "$version" != *-* ]]; then
-                echo "Dev requires a pre-release version suffix (e.g. -dev.1)."
-                exit 1
-              fi
-            fi
-          else
-            echo "pubspec.yaml not changed; skipping version channel check."
+          lane="${GITHUB_BASE_REF:-$GITHUB_REF_NAME}"
+          version=$(awk '/^version:/ {print $2; exit}' pubspec.yaml | tr -d "\"'")
+          stable_pattern='^[0-9]+\.[0-9]+\.[0-9]+(\+[0-9A-Za-z.-]+)?$'
+          prerelease_pattern='^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+(\+[0-9A-Za-z.-]+)?$'
+          if [[ "$lane" == 'main' && ! "$version" =~ $stable_pattern ]]; then
+            echo "Main requires a stable semantic version, got $version."
+            exit 1
+          fi
+          if [[ "$lane" == 'dev' && ! "$version" =~ $prerelease_pattern ]]; then
+            echo "Dev requires a prerelease semantic version, got $version."
+            exit 1
           fi
 
       - name: Install dependencies
@@ -64,10 +59,12 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Dart (beta)
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
           sdk: beta
 
@@ -85,29 +82,86 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Keep in sync with the lower bound of `environment.sdk` in pubspec.yaml.
       - name: Setup Dart (min SDK)
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
-          sdk: "3.12.0"
+          sdk: "3.13.5"
 
       - name: Install dependencies
         run: dart pub get
 
+      - name: Analyze
+        run: dart analyze
+
       - name: Test
         run: dart test
+
+  test-min-dependencies:
+    name: Test on minimum dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Dart (min SDK)
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: "3.13.5"
+
+      - name: Resolve minimum dependencies
+        run: dart pub downgrade
+
+      # test_core 0.6.21 permits frontend_server_client 3.2.0, which expects the
+      # frontend_server.dart.snapshot removed from current Dart SDKs. Keep the
+      # full public dependency graph downgraded and upgrade only this test tool.
+      # Remove this step when test_core requires a compatible client itself.
+      - name: Use a test runner compatible with the minimum SDK
+        run: dart pub upgrade frontend_server_client
+
+      - name: Analyze
+        run: dart analyze
+
+      - name: Test
+        run: dart test
+
+  test-browser:
+    name: Test on Chrome
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Dart (stable)
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Test browser conversion
+        run: dart test --platform chrome test/web_conversion_test.dart
 
   pana:
     name: Pana
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Dart (stable)
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
           sdk: stable
 
@@ -115,7 +169,7 @@ jobs:
         run: dart pub get
 
       - name: Install pana
-        run: dart pub global activate pana 0.23.14
+        run: dart pub global activate pana 0.23.19
 
       - name: Run pana (full score required)
         run: pana --exit-code-threshold 0 .
@@ -125,10 +179,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Dart (stable)
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
           sdk: stable
 
@@ -146,7 +202,7 @@ jobs:
 
       # Public repos need no token. Delete this step for a token-free setup.
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage/lcov.info
           fail_ci_if_error: false

@@ -5,69 +5,128 @@ on:
     branches: [main, dev]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: auto-release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.TAG_PUSH_PAT }}
+          persist-credentials: false
 
-      - name: Check pubspec change
-        id: changes
+      - name: Compare package versions
+        id: version
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        shell: bash
         run: |
-          if git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -q '^pubspec.yaml$'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Compute tag
-        id: tag
-        if: steps.changes.outputs.changed == 'true'
-        run: |
-          package=$(awk '/^name:/ {print $2}' pubspec.yaml)
-          version=$(awk '/^version:/ {print $2}' pubspec.yaml)
-          if [[ -z "$package" || -z "$version" ]]; then
-            echo "Failed to read package name or version from pubspec.yaml"
+          set -euo pipefail
+          package=$(awk '/^name:/ {print $2; exit}' pubspec.yaml | tr -d "\"'")
+          version=$(awk '/^version:/ {print $2; exit}' pubspec.yaml | tr -d "\"'")
+          if [[ "$package" != 'docx_to_markdown' ]]; then
+            echo 'Package name must match the publish workflow tag filter.'
             exit 1
           fi
-          if [[ "${GITHUB_REF_NAME}" == "main" && "$version" == *-* ]]; then
-            echo "Main requires a stable version (no pre-release suffix)."
+          stable_pattern='^[0-9]+\.[0-9]+\.[0-9]+(\+[0-9A-Za-z.-]+)?$'
+          prerelease_pattern='^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+(\+[0-9A-Za-z.-]+)?$'
+          if [[ "$GITHUB_REF_NAME" == 'main' && ! "$version" =~ $stable_pattern ]]; then
+            echo "Main requires a stable semantic version, got $version."
             exit 1
           fi
-          if [[ "${GITHUB_REF_NAME}" == "dev" && "$version" != *-* ]]; then
-            echo "Dev requires a pre-release version suffix (e.g. -dev.1)."
+          if [[ "$GITHUB_REF_NAME" == 'dev' && ! "$version" =~ $prerelease_pattern ]]; then
+            echo "Dev requires a prerelease semantic version, got $version."
             exit 1
           fi
-          echo "tag=${package}-v${version}" >> "$GITHUB_OUTPUT"
+          if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            echo 'Branch creation detected; no release tag will be created.'
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          old_version=$(git show "$BEFORE_SHA:pubspec.yaml" | awk '/^version:/ {print $2; exit}' | tr -d "\"'")
+          if [[ -z "$old_version" ]]; then
+            echo 'Unable to read the previous package version.'
+            exit 1
+          fi
+          if [[ "$old_version" == "$version" ]]; then
+            echo "Version remains $version; no release tag will be created."
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo 'changed=true'
+            echo "tag=${package}-v${version}"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Fail if tag exists
-        if: steps.changes.outputs.changed == 'true'
+      - name: Verify tag is new
+        if: steps.version.outputs.changed == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
         run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          if git rev-parse "$tag" >/dev/null 2>&1; then
-            echo "Tag $tag already exists. Bump version and re-run."
+          set -euo pipefail
+          remote_tag=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || [[ -n "$remote_tag" ]]; then
+            echo "Tag $RELEASE_TAG already exists. Never move or reuse a release tag."
+            exit 1
+          fi
+
+      - name: Prepare release notes
+        if: steps.version.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '/^version:/ {print $2; exit}' pubspec.yaml | tr -d "\"'")
+          notes="$RUNNER_TEMP/release-notes.md"
+          awk -v heading="## $version" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          if ! grep -q '[^[:space:]]' "$notes"; then
+            echo "CHANGELOG.md has no release notes for $version."
             exit 1
           fi
 
       - name: Create and push tag
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.version.outputs.changed == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          TAG_PUSH_PAT: ${{ secrets.TAG_PUSH_PAT }}
+        shell: bash
         run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$tag"
-          git push origin "$tag"
+          set -euo pipefail
+          if [[ -z "$TAG_PUSH_PAT" ]]; then
+            echo 'TAG_PUSH_PAT is required to trigger the publish workflow.'
+            exit 1
+          fi
+          git tag "$RELEASE_TAG" "$GITHUB_SHA"
+          # Use the existing PAT only for this push; do not persist credentials.
+          authorization=$(printf 'x-access-token:%s' "$TAG_PUSH_PAT" | base64 | tr -d '\n')
+          echo "::add-mask::$authorization"
+          git -c credential.helper= \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+            push origin "refs/tags/$RELEASE_TAG"
 
       - name: Create GitHub release
-        if: steps.changes.outputs.changed == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
-          prerelease: ${{ github.ref_name == 'dev' }}
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          args=("$RELEASE_TAG" --verify-tag --notes-file "$notes" --target "$GITHUB_SHA")
+          if [[ "$GITHUB_REF_NAME" == 'dev' ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
