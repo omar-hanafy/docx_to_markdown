@@ -77,7 +77,9 @@ class DocxParser {
     this.allowUnmappedMediaReferences = true,
     required this.onWarning,
   }) : _numbering = _NumberingModel.fromXml(package.numberingXml),
-       _comments = _CommentIndex.fromXml(package.commentsXml);
+       _comments = _CommentIndex.fromXml(
+         config.includeComments ? package.commentsXml : null,
+       );
 
   /// The DOCX package being parsed.
   final DocxPackage package;
@@ -439,6 +441,10 @@ class DocxParser {
       }
     }
 
+    // OOXML reserves numId zero for removing inherited numbering. It is not
+    // a numbering definition and must preserve the paragraph's own semantics.
+    if (int.tryParse(effectiveNumId ?? '') == 0) effectiveNumId = null;
+
     if (effectiveNumId != null) {
       final levelInfo = _numbering.levelInfo(
         numId: effectiveNumId,
@@ -683,7 +689,8 @@ class DocxParser {
         break;
 
       case 'ins':
-        // Tracked insertion: keep inline unless revisions are rejected.
+      case 'moveTo':
+        // Insertions and move destinations survive accepted revisions.
         if (config.trackChangesMode != TrackChangesMode.rejectChanges) {
           recurse(child, cLoc);
         }
@@ -757,11 +764,12 @@ class DocxParser {
         break;
 
       case 'del':
+      case 'moveFrom':
         switch (config.trackChangesMode) {
           case TrackChangesMode.acceptAll:
             _warn(
               code: 'trackChanges.deletionDropped',
-              message: 'Dropped deleted text (w:del).',
+              message: 'Dropped deleted text (w:${child.name.local}).',
               location: cLoc,
             );
             break;
@@ -1882,8 +1890,8 @@ class DocxParser {
     return sb.toString();
   }
 
-  /// Extracts the text of a `w:del` deletion. Word stores deleted runs in
-  /// `w:delText`; we also accept `w:t` for lenient inputs.
+  /// Extracts deleted or moved source text. Deletions use `w:delText` while
+  /// tracked moves use `w:t`; lenient inputs may use either representation.
   String _delText(XmlElement del) => del.descendants
       .whereType<XmlElement>()
       .where((e) => e.name.local == 'delText' || e.name.local == 't')
@@ -1958,19 +1966,13 @@ class DocxParser {
       return target;
     }
 
-    var t = target.replaceAll('\\', '/');
-    while (t.startsWith('./')) {
-      t = t.substring(2);
-    }
-    while (t.startsWith('../')) {
-      t = t.substring(3);
-    }
-
-    final partPath = t.startsWith('word/') ? t : 'word/$t';
+    // Relationship resolution already returns a package-root-relative part
+    // path. Image parts may live outside the conventional word/ directory.
+    final partPath = package.canonicalizePartPath(target);
     final mapped = mediaMap[partPath];
     if (mapped != null && mapped.isNotEmpty) return mapped;
     if (!allowUnmappedMediaReferences) return null;
-    return t.split('/').last;
+    return partPath.split('/').last;
   }
 
   List<Block> _applyHooksToBlocks(

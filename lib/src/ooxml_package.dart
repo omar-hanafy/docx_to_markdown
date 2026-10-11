@@ -8,7 +8,7 @@
 // - Load XML parts with caching + good error messages
 // - Parse OPC relationships (.rels) for any source part
 // - Resolve relationship targets correctly (relative -> absolute part path)
-// - Extract media (word/media/*) to a directory (optional)
+// - Extract embedded image parts to a directory or asset sink (optional)
 //
 // Notes:
 // - Uses posix paths for OPC part names regardless of platform.
@@ -17,7 +17,7 @@
 //
 // Dependencies:
 //   archive: ^4.x
-//   xml: ^6.x
+//   xml: ^7.x
 //   path: ^1.9.x
 //   collection: ^1.18.x (optional but handy)
 
@@ -492,8 +492,7 @@ class DocxPackage {
     if (bytes == null) return null;
 
     try {
-      // Allow malformed UTF-8 so we can still parse most documents and fail only on XML issues.
-      final xmlText = utf8.decode(bytes, allowMalformed: true);
+      final xmlText = _decodeXml(bytes);
       final doc = XmlDocument.parse(xmlText);
       // Evict oldest entry if cache is full (simple FIFO eviction)
       if (_xmlCache.length >= _maxXmlCacheEntries) {
@@ -620,7 +619,7 @@ class DocxPackage {
     return resolveRelTarget(mainDocumentPartPath, rId);
   }
 
-  /// Returns embedded image assets under `word/media/`.
+  /// Returns embedded images referenced by relationships and `word/media/` files.
   ///
   /// The generated [DocxImageAsset.suggestedFilename] values are stable for a
   /// given package and mirror the filenames used by [extractMediaToDirectory].
@@ -657,7 +656,7 @@ class DocxPackage {
     return out;
   }
 
-  /// Extract all files under word/media/ to [outputDir].
+  /// Extract embedded images and all files under `word/media/` to [outputDir].
   ///
   /// Returns a mapping:
   ///   internalPartPath -> returnedPath
@@ -767,10 +766,33 @@ class DocxPackage {
 
   List<_MediaEntry> _mediaEntries({String? filenamePrefix}) {
     _ensureOpen();
+    // OPC relationships, rather than directory names, identify image parts.
+    // Retain conventional media entries for packages with incomplete relations.
+    final imageParts = <String>{};
+    for (final part in _filesByCanonicalName.keys) {
+      if (!part.endsWith('.rels') ||
+          p.posix.basename(p.posix.dirname(part)) != '_rels') {
+        continue;
+      }
+      final source = part == '_rels/.rels'
+          ? ''
+          : p.posix.join(
+              p.posix.dirname(p.posix.dirname(part)),
+              p.posix.basenameWithoutExtension(part),
+            );
+      for (final rel in relationshipsForPart(
+        source,
+      ).whereTypeSuffix(DocxRelTypeSuffix.image)) {
+        if (!rel.isExternal) imageParts.add(rel.resolvedTarget);
+      }
+    }
     final entries =
         _filesByCanonicalName.entries
             .where(
-              (e) => e.key.startsWith('word/media/') && !e.value.isDirectory,
+              (e) =>
+                  !e.value.isDirectory &&
+                  (e.key.startsWith('word/media/') ||
+                      imageParts.contains(e.key)),
             )
             .toList()
           ..sort((a, b) => a.key.compareTo(b.key));
@@ -881,6 +903,35 @@ class DocxPackage {
     final resolved = p.posix.normalize(p.posix.join(baseDir, t));
     return _canonicalPartPath(resolved);
   }
+}
+
+String _decodeXml(Uint8List bytes) {
+  // XML permits UTF-8 and both UTF-16 byte orders. A BOM identifies UTF-16;
+  // the initial '<' also identifies explicitly endian-labelled XML without it.
+  final hasBom =
+      bytes.length >= 2 &&
+      ((bytes[0] == 0xff && bytes[1] == 0xfe) ||
+          (bytes[0] == 0xfe && bytes[1] == 0xff));
+  final littleEndian =
+      bytes.length >= 2 &&
+      ((bytes[0] == 0xff && bytes[1] == 0xfe) ||
+          (bytes[0] == 0x3c && bytes[1] == 0));
+  final bigEndian =
+      bytes.length >= 2 &&
+      ((bytes[0] == 0xfe && bytes[1] == 0xff) ||
+          (bytes[0] == 0 && bytes[1] == 0x3c));
+  if (!littleEndian && !bigEndian) {
+    return utf8.decode(bytes, allowMalformed: true);
+  }
+  if (bytes.length.isOdd) {
+    throw const FormatException('Truncated UTF-16 XML code unit.');
+  }
+  final data = ByteData.sublistView(bytes);
+  final endian = littleEndian ? Endian.little : Endian.big;
+  return String.fromCharCodes([
+    for (var i = hasBom ? 2 : 0; i < bytes.length; i += 2)
+      data.getUint16(i, endian),
+  ]);
 }
 
 class _MediaEntry {

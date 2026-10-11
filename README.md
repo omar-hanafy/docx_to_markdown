@@ -31,6 +31,8 @@ final markdown = await DocxConverter(bytes).convert();
 
 ## Install
 
+Requires Dart 3.13.5 or later. For Flutter projects, use Flutter 3.47.7 or later.
+
 ```bash
 dart pub add docx_to_markdown
 # Flutter:
@@ -41,7 +43,7 @@ Or add it to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  docx_to_markdown: ^0.1.0
+  docx_to_markdown: ^0.3.0
 ```
 
 ## Quick start

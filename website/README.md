@@ -90,7 +90,7 @@ directory**.
 | Root directory   | `website`        |
 | Build command    | `npm run build`  |
 | Output directory | `dist`           |
-| Node version     | 20+ (26 tested)  |
+| Node version     | 22.12+ (26 tested) |
 | Env (recommended)| `SITE_URL=https://your-domain.com` |
 
 - **Cloudflare Pages** (recommended - free, fast custom domains): the `_headers`

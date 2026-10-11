@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Raised the minimum Dart SDK to 3.13.5. Flutter consumers should use Flutter 3.47.7 or later.
+- Updated archive, XML, and metadata dependencies to their current supported releases.
+- Fixed inline code containing boundary backticks or only spaces losing its content or rendering as literal Markdown.
+- Fixed endnote definitions being omitted when endnotes are enabled and footnotes are disabled.
+- Honored explicit numbering removal (`w:numId="0"`) instead of adding a bullet.
+- Applied the selected tracked-change mode to moved text, avoiding duplicate original and destination content.
+- Stopped loading malformed comment parts when comments are disabled.
+- Fixed conversion of UTF-16 XML parts, including Arabic, CJK, and supplementary Unicode characters.
+- Fixed image export for images stored outside `word/media/`, following image relationships throughout the package.
+
 ## 0.2.0
 
 This release changes the Markdown produced for documents that already converted; review the notes below before upgrading pinned output.

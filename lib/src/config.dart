@@ -546,8 +546,10 @@ typedef BlockTransformer = Block? Function(Block block, HookContext ctx);
 ///
 /// Return the inline unchanged, return a modified inline, or return `null`
 /// to drop it from output.
-typedef InlineTransformer =
-    Inline? Function(Inline inlineNode, HookContext ctx);
+typedef InlineTransformer = Inline? Function(
+  Inline inlineNode,
+  HookContext ctx,
+);
 
 /// Rewrites hyperlink URLs before rendering.
 ///
@@ -566,8 +568,10 @@ typedef ImageRewriter = String Function(String src, [HookContext? ctx]);
 /// DOCX equations use OMML format. Return a LaTeX string to render the
 /// equation, or return `null` to fall back to extracting raw text from
 /// the `<m:t>` elements (lossy but readable).
-typedef OmmlToLatexConverter =
-    String? Function(String ommlXml, [HookContext? ctx]);
+typedef OmmlToLatexConverter = String? Function(
+  String ommlXml, [
+  HookContext? ctx,
+]);
 
 /// Extension points for customizing parsing and rendering behavior.
 ///

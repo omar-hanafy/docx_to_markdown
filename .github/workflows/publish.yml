@@ -19,4 +19,5 @@ jobs:
   publish:
     permissions:
       id-token: write # required for OIDC token minting
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    # The official Trusted Publisher contract intentionally tracks the v1 workflow.
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1 # zizmor: ignore[unpinned-uses]

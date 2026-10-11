@@ -20,9 +20,8 @@ void main() {
     );
 
     test('metadataMode none renders no front matter', () {
-      final md = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(docWith(richMeta));
+      final md = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(docWith(richMeta));
       expect(md, 'Body text');
       expect(md, isNot(contains('---')));
       expect(md, isNot(contains('title:')));
@@ -91,9 +90,8 @@ Body text''');
         ],
       );
 
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '###### Hello<br>World');
     });
 
@@ -119,9 +117,8 @@ Body text''');
         ],
       );
 
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(
         markdown.trim(),
         'A **B** *I* <u>U</u> ~~S~~ <sub>2</sub> <sup>3</sup> ``code`tick``',
@@ -142,9 +139,8 @@ Body text''');
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '**bold *bold italics***');
     });
 
@@ -161,9 +157,8 @@ Body text''');
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '***X***<!-- -->*Y*');
       expect(markdown, isNot(contains('****')));
     });
@@ -177,9 +172,8 @@ Body text''');
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '<u>one two</u>');
     });
 
@@ -198,9 +192,9 @@ Body text''');
         '<mark>x</mark>',
       );
       expect(
-        MarkdownRenderer(
-          config: DocxToMarkdownConfig.defaults,
-        ).render(doc).trim(),
+        MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+            .render(doc)
+            .trim(),
         'x',
       );
     });
@@ -220,9 +214,9 @@ Body text''');
         '<span style="color:#FF0000">x</span>',
       );
       expect(
-        MarkdownRenderer(
-          config: DocxToMarkdownConfig.defaults,
-        ).render(doc).trim(),
+        MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+            .render(doc)
+            .trim(),
         'x',
       );
     });
@@ -246,9 +240,9 @@ Body text''');
         '<!-- page break -->',
       );
       expect(
-        MarkdownRenderer(
-          config: DocxToMarkdownConfig.defaults,
-        ).render(doc).trim(),
+        MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+            .render(doc)
+            .trim(),
         '',
       );
     });
@@ -435,9 +429,8 @@ World
         ],
       );
       final doc = Document(blocks: [list]);
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '- A\n\n- B');
     });
 
@@ -479,9 +472,8 @@ World
         alignments: const [TableAlign.left, TableAlign.right],
       );
       final doc = Document(blocks: [table]);
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '| H1 | H2 |\n|:---|---:|\n| A | B |');
     });
 
@@ -521,9 +513,8 @@ World
         ),
       );
       final doc = Document(blocks: [table]);
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim().startsWith('<table>'), isTrue);
       expect(markdown, contains('<td>A</td>'));
       expect(markdown, contains('<td>C</td>'));
@@ -676,9 +667,8 @@ World
         ),
       );
       final doc = Document(blocks: [table]);
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim().startsWith('<table>'), isTrue);
     });
 
@@ -686,9 +676,8 @@ World
       final doc = Document(
         blocks: const [MathBlock(r'$$x+y$$'), MathBlock(r'x+y')],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.contains(r'\['), isTrue);
       expect(markdown.contains(r'$$'), isTrue);
     });
@@ -778,9 +767,8 @@ World
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(
         markdown.trim(),
         r'[Link](https://example.com "A \"title\"") ![Alt](img.png "Image title")',
@@ -801,9 +789,8 @@ World
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       // Underscore escaped exactly once; bold markers preserved, not escaped.
       expect(markdown.trim(), r'[ref\_fig**bold**](#ref_target)');
     });
@@ -823,9 +810,8 @@ World
         ],
       );
 
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
 
       expect(markdown.trim(), '[Section 1](#outer)');
       expect(markdown, isNot(contains('](#inner)')));
@@ -858,9 +844,8 @@ World
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '> Quote');
     });
 
@@ -881,9 +866,8 @@ World
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '> - Item');
     });
 
@@ -893,9 +877,8 @@ World
           ParagraphBlock([const TextInline('- not a list')]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), r'\- not a list');
     });
 
@@ -948,9 +931,8 @@ World
 
     test('renders horizontal rules', () {
       final doc = Document(blocks: const [HorizontalRuleBlock()]);
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '---');
     });
 
@@ -1008,9 +990,8 @@ World
       final doc = Document(
         blocks: const [HtmlBlock('<div>Hi</div>\n<span>There</span>')],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '<div>Hi</div>\n<span>There</span>');
     });
 
@@ -1025,9 +1006,8 @@ World
           ]),
         ],
       );
-      final markdown = MarkdownRenderer(
-        config: DocxToMarkdownConfig.defaults,
-      ).render(doc);
+      final markdown = MarkdownRenderer(config: DocxToMarkdownConfig.defaults)
+          .render(doc);
       expect(markdown.trim(), '[link](<https://example.com/a%20b>)');
     });
   });
@@ -1038,9 +1018,9 @@ World
     // the formatted run, so wrapping content verbatim yields `**1.  **`, which
     // every parser renders as literal asterisks.
     String render(List<Inline> inlines, [DocxToMarkdownConfig? config]) =>
-        MarkdownRenderer(
-          config: config ?? DocxToMarkdownConfig.defaults,
-        ).render(Document(blocks: [ParagraphBlock(inlines)])).trim();
+        MarkdownRenderer(config: config ?? DocxToMarkdownConfig.defaults)
+            .render(Document(blocks: [ParagraphBlock(inlines)]))
+            .trim();
 
     test('hoists a trailing space out of strong', () {
       expect(
